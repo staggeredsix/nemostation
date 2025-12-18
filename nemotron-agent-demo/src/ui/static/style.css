@@ -94,3 +94,44 @@ body, .gradio-container {
   white-space: pre-wrap;
   font-family: "JetBrains Mono", monospace;
 }
+
+.prompt-source {
+  background: #111927;
+  border: 1px solid #1f2a3a;
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.prompt-source .label {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.unsaved {
+  color: #ffd166;
+  font-weight: 700;
+}
+
+.prompt-badge {
+  display: inline-flex;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  margin-top: 6px;
+}
+
+.prompt-badge.default {
+  background: #113927;
+  color: var(--success);
+}
+
+.prompt-badge.override {
+  background: #3f2a14;
+  color: #ffb347;
+}

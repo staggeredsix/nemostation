@@ -1,0 +1,10 @@
+[
+  {"name": "Meatball recipe", "content": "Give me a detailed meatball recipe with a shopping list."},
+  {"name": "Fix this K8s YAML + logs", "content": "Help me debug a Kubernetes deployment using the provided YAML and logs."},
+  {"name": "Design a GB300 inference service", "content": "Design a resilient inference service on GB300 with scaling guidance and observability hooks."},
+  {"name": "Write a one-click deploy script", "content": "Write a single-script deploy for this project with sane defaults."},
+  {"name": "Summarize a long document", "content": "Summarize the attached long-form document with a bullet list and key risks."},
+  {"name": "Create a troubleshooting plan", "content": "Produce a stepwise troubleshooting plan with checkpoints and owners."},
+  {"name": "Generate a demo script for a showroom", "content": "Draft a concise showroom demo script with beats and narration."},
+  {"name": "Optimize vLLM flags for latency", "content": "Recommend vLLM flags that minimize latency for chat completions."}
+]
