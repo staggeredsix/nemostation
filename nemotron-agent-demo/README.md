@@ -9,24 +9,47 @@ Brain-melty local demo that drives a single Nemotron-3 Nano model through planne
 - CLI demo that streams stage states in the terminal.
 - Offline-friendly after first model download.
 
-## Setup
+## Containerized quickstart (recommended)
+
+### Prerequisites
+- Docker with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+- An NVIDIA GPU
+
+### Run everything in one command
+```bash
+./run_all.sh
+```
+This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
+- **vLLM server** (`nemotron-vllm`): nvcr.io/nvidia/vllm:25.11-py3, served at `http://localhost:8000/v1`
+- **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
+
+### Useful endpoints and volumes
+- Check the server: `curl http://localhost:8000/v1/models`
+- Open the UI: `http://localhost:7860`
+- HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
+- Prompt edits persist in `./prompt_library` (mounted to `/app/prompt_library`)
+- Default prompts and context are bind-mounted read-only from `./prompts` and `./context`
+
+### Environment overrides
+- `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
+- `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location
+- The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-vllm:8000/v1`)
+
+### Troubleshooting
+- **GPU access**: verify `nvidia-smi` works on the host and Docker can see GPUs.
+- **Model download/auth**: set `HF_TOKEN` and ensure `./_hf_cache` has space.
+- **OOM or slow load**: lower `--max-model-len` or `--gpu-memory-utilization` in `docker-compose.yml`.
+- **Port conflicts**: adjust port mappings in `docker-compose.yml` (e.g., `8001:8000`, `7861:7860`).
+
+## Running locally without containers (legacy)
 ```bash
 cd nemotron-agent-demo
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-## Start the server (one command)
-```bash
-MODEL_ID=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 ./run_server.sh
-```
-This launches vLLM with `--max-model-len 16384` and `--gpu-memory-utilization 0.90`, waits for `/v1/models`, then prints `SERVER READY`.
-
-## Start the UI (one command)
-```bash
+./run_server.sh &
 ./run_ui.sh
 ```
-Opens Gradio on `http://localhost:7860` with the live timeline, animated badges, and metrics panel. The UI pings `/v1/models` on load and blocks runs if the server is down.
+Container-first is preferred; local runs still expect a GPU and will download weights into `~/.cache/huggingface`.
 
 ## Managing prompts from the UI
 - Open the **Prompts** tab to manage both goal presets and agent prompts without touching the CLI.

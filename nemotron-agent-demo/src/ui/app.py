@@ -23,12 +23,12 @@ from src.demo.prompts import (
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CSS_PATH = STATIC_DIR / "style.css"
 
-SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8000")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1").rstrip("/")
 
 
 def ping_server() -> bool:
     try:
-        resp = requests.get(f"{SERVER_URL}/v1/models", timeout=3)
+        resp = requests.get(f"{OPENAI_BASE_URL}/models", timeout=3)
         return resp.status_code == 200
     except requests.RequestException:
         return False
@@ -88,7 +88,7 @@ def _default_prompt_source() -> str:
 
 def stream_runner(goal: str, scenario: str, fast: bool):
     if not ping_server():
-        raise gr.Error("Server not ready at /v1/models. Start run_server.sh first.")
+        raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
 
     for state in run_demo_stream(goal, fast=fast, scenario=scenario or None):
         metrics_html = render_metrics(state)
