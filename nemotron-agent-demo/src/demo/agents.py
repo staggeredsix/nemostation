@@ -8,7 +8,7 @@ from openai import OpenAI
 
 from .prompts import get_active_prompt, get_context_payload
 
-OPENAI_BASE_URL = "http://localhost:8000/v1"
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
 API_KEY = "none"
 MODEL_ID = os.getenv("MODEL_ID", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
 
