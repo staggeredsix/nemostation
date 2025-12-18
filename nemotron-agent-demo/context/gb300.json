@@ -1,0 +1,11 @@
+{
+  "gpu": "GB300",
+  "memory_gb": 120,
+  "nvlink": true,
+  "intended_workload": "Local agentic reasoning demo with Nemotron-3 Nano",
+  "notes": [
+    "Single-node, single-GPU setup",
+    "Use Hugging Face weights only",
+    "Prefer conservative runtime flags for stability"
+  ]
+}
