@@ -30,7 +30,9 @@ This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers v
 ### Useful endpoints and volumes
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
-- On first run the vLLM container warms the model cache before reporting ready; subsequent starts are offline-fast from cache.
+- On first run the vLLM container warms the model cache (full weights download) before reporting ready; this can take a while depending on your network and disk.
+- Tail the vLLM logs while it downloads: `docker logs -f nemotron-vllm`
+- Verify cached weights: `ls ./_hf_cache/hub`
 - HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
 - Prompt edits persist in `./prompt_library` (mounted to `/app/prompt_library`)
 - Default prompts and context are bind-mounted read-only from `./prompts` and `./context`

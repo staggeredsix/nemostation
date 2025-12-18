@@ -25,9 +25,10 @@ services:
       - "8000:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
-      interval: 30s
+      interval: 10s
       timeout: 10s
-      retries: 5
+      retries: 300
+      start_period: 30m
 
   nemotron-ui:
     build:
