@@ -5,33 +5,29 @@ services:
     image: nvcr.io/nvidia/vllm:25.11-py3
     container_name: nemotron-vllm
     restart: unless-stopped
-    runtime: nvidia
+    entrypoint: ["/bin/bash", "/scripts/vllm_entrypoint.sh"]
+    gpus: all
     environment:
       MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: ${HF_HOME:-/root/.cache/huggingface}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
-    command: >
-      python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000
-      --model ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
-      --max-model-len 16384
-      --gpu-memory-utilization 0.90
+    ipc: host
+    shm_size: "8gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
     volumes:
       - ./_hf_cache:/root/.cache/huggingface
+      - ./scripts:/scripts:ro
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v1/models')"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
       interval: 30s
       timeout: 10s
       retries: 5
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
 
   nemotron-ui:
     build:
@@ -52,4 +48,3 @@ services:
     depends_on:
       nemotron-vllm:
         condition: service_healthy
-

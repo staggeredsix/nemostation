@@ -19,6 +19,10 @@ Brain-melty local demo that drives a single Nemotron-3 Nano model through planne
 ```bash
 ./run_all.sh
 ```
+Or directly:
+```bash
+docker compose up --build
+```
 This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
 - **vLLM server** (`nemotron-vllm`): nvcr.io/nvidia/vllm:25.11-py3, served at `http://localhost:8000/v1`
 - **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
@@ -26,13 +30,14 @@ This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers v
 ### Useful endpoints and volumes
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
+- On first run the vLLM container warms the model cache before reporting ready; subsequent starts are offline-fast from cache.
 - HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
 - Prompt edits persist in `./prompt_library` (mounted to `/app/prompt_library`)
 - Default prompts and context are bind-mounted read-only from `./prompts` and `./context`
 
 ### Environment overrides
 - `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
-- `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location
+- `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location (set `HF_TOKEN` for gated models)
 - The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-vllm:8000/v1`)
 
 ### Troubleshooting
