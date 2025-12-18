@@ -1,0 +1,96 @@
+:root {
+  --bg: #0b0f17;
+  --card: #121826;
+  --accent: #00e5a0;
+  --muted: #8aa0b3;
+  --danger: #ff5f5f;
+  --success: #40d688;
+}
+body, .gradio-container {
+  background: var(--bg);
+  color: #e7f2ff;
+}
+.card {
+  background: var(--card);
+  border: 1px solid #1f2a3a;
+  border-radius: 12px;
+  padding: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.badge.queued { background: #2b3445; color: var(--muted); }
+.badge.running { background: #12314f; color: #8ad4ff; animation: pulse 1.2s infinite; }
+.badge.done { background: #113927; color: var(--success); }
+.badge.failed { background: #3f1616; color: var(--danger); }
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(0,229,160,0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(0,229,160,0); }
+  100% { box-shadow: 0 0 0 0 rgba(0,229,160,0); }
+}
+
+.timeline-row {
+  display: grid;
+  grid-template-columns: 160px 1fr 120px 120px 120px 100px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #1b2433;
+}
+.timeline-row:last-child { border-bottom: none; }
+.timeline-name { font-weight: 700; }
+.progress-shell {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #1b2433;
+  overflow: hidden;
+  border: 1px solid #273145;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #00e5a0, #00b5ff);
+  transition: width 0.4s ease;
+}
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.metrics-card {
+  background: #111927;
+  border-radius: 10px;
+  padding: 10px;
+  border: 1px solid #1f2a3a;
+  text-align: left;
+}
+.metrics-card .label { color: var(--muted); font-size: 12px; }
+.metrics-card .value { font-size: 20px; font-weight: 800; }
+.server-pill {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.server-pill.up { background: #113927; color: var(--success); }
+.server-pill.down { background: #3f1616; color: var(--danger); }
+.agent-output {
+  background: #0f1724;
+  border: 1px solid #1f2a3a;
+  border-radius: 10px;
+  padding: 10px;
+  white-space: pre-wrap;
+  font-family: "JetBrains Mono", monospace;
+}
