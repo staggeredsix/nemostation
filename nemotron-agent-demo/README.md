@@ -44,7 +44,7 @@ On first run, TensorRT-LLM may compile/build artifacts and download weights. Sub
 If the UI image changes, rebuild with no cache:
 ```bash
 docker compose build --no-cache nemotron-ui
-docker compose up
+docker compose up -d
 ```
 
 ### Useful endpoints and volumes

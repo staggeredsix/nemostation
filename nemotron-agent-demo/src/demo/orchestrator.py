@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Generator, List, Optional
 
-from src.memory.dml_layer import DMLMemoryLayer
+from src.memory.dml_layer import DMLMemoryLayer, DML_AVAILABLE
 
 from .agents import AgentResult, call_agent
 from .metrics import StageMetrics, compute_throughput, estimate_tokens
@@ -109,12 +109,21 @@ def run_demo_stream(
     stage_order.append("aggregator")
     stages = [StageState(name=s.title()) for s in stage_order]
 
-    dml_layer = DMLMemoryLayer(enabled=use_dml)
+    dml_layer = None
+    dml_error: Optional[str] = None
+    if use_dml:
+        if DML_AVAILABLE:
+            try:
+                dml_layer = DMLMemoryLayer(enabled=True)
+            except Exception as exc:  # noqa: BLE001
+                dml_error = str(exc)
+        else:
+            dml_error = "DML not available"
     dml_info = {
         "requested": use_dml,
-        "enabled": bool(use_dml and dml_layer.enabled),
+        "enabled": bool(use_dml and dml_layer and dml_layer.enabled),
         "top_k": dml_top_k,
-        "error": dml_layer.error,
+        "error": dml_error or (dml_layer.error if dml_layer else None),
     }
 
     start_time = time.perf_counter()
@@ -140,7 +149,7 @@ def run_demo_stream(
             dml_payload = _default_dml_payload(enabled=bool(use_dml))
             system_messages: List[str] = []
             if use_dml:
-                if dml_layer.enabled:
+                if dml_layer and dml_layer.enabled:
                     try:
                         retrieval_prompt = f"Stage: {stage_name}\nGoal: {goal}\nScenario: {scenario or 'general'}"
                         if extra_context:
@@ -167,7 +176,7 @@ def run_demo_stream(
                     except Exception as exc:  # noqa: BLE001
                         dml_payload["error"] = str(exc)
                 else:
-                    dml_payload["error"] = dml_layer.error or "DML unavailable"
+                    dml_payload["error"] = dml_error or (dml_layer.error if dml_layer else "DML not available")
             _update_stage(stages, stage_name, dml=dml_payload)
             result = call_agent(
                 stage_name,
@@ -215,7 +224,7 @@ def run_demo_stream(
 
     total_ms = (time.perf_counter() - start_time) * 1000
     final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
-    if use_dml and dml_layer.enabled:
+    if use_dml and dml_layer and dml_layer.enabled:
         summary_lines = [
             f"Goal: {goal}",
             f"Final answer excerpt: {_compact_text(final_text, 360)}",

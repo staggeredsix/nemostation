@@ -1,29 +1,52 @@
 from __future__ import annotations
 
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+logger = logging.getLogger(__name__)
+
 DML_AVAILABLE = False
 DMLAdapter = None
+DML_IMPORT_ERROR: Optional[Exception] = None
+DML_VENDOR_PATH: Optional[Path] = None
+DML_VENDOR_PATHS: list[Path] = []
 
 
-def _add_vendor_path() -> None:
+def _add_vendor_path() -> Optional[Path]:
     repo_root = Path(__file__).resolve().parents[3]
-    vendor_path = repo_root / "vendors" / "daystrom_memeory_lattice_alpha1"
-    if vendor_path.exists() and str(vendor_path) not in sys.path:
-        sys.path.insert(0, str(vendor_path))
+    global DML_VENDOR_PATHS
+    DML_VENDOR_PATHS = [
+        Path("/app/nemostation/vendors/daystrom_memory_lattice_alpha1"),
+        repo_root.parent / "vendors" / "daystrom_memory_lattice_alpha1",
+        repo_root / "vendors" / "daystrom_memory_lattice_alpha1",
+    ]
+    for vendor_path in DML_VENDOR_PATHS:
+        if vendor_path.exists():
+            if str(vendor_path) not in sys.path:
+                sys.path.insert(0, str(vendor_path))
+            return vendor_path
+    return None
 
 
-_add_vendor_path()
+DML_VENDOR_PATH = _add_vendor_path()
 
 try:
     from daystrom_dml.dml_adapter import DMLAdapter
 
     DML_AVAILABLE = True
-except Exception:
+except Exception as exc:
     DML_AVAILABLE = False
+    DMLAdapter = None
+    DML_IMPORT_ERROR = exc
+
+if DML_AVAILABLE:
+    logger.info("DML available: True (path=%s)", DML_VENDOR_PATH or "default")
+else:
+    checked_paths = ", ".join(str(path) for path in DML_VENDOR_PATHS) or "none"
+    logger.info("DML available: False (checked=%s, error=%s)", checked_paths, DML_IMPORT_ERROR)
 
 
 @dataclass
@@ -37,6 +60,8 @@ class DMLReport:
 
 class DMLMemoryLayer:
     def __init__(self, enabled: bool = True, storage_dir: Optional[Path] = None) -> None:
+        if enabled and not DML_AVAILABLE:
+            raise RuntimeError(f"DML not available (checked {DML_VENDOR_PATH or 'unknown'})")
         self.enabled = False
         self.error: Optional[str] = None
         self._adapter: Optional[DMLAdapter] = None
