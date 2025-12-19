@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -9,7 +10,10 @@ VENDOR_ROOT = Path(__file__).resolve().parents[3] / "vendors" / "daystrom_memeor
 if str(VENDOR_ROOT) not in sys.path:
     sys.path.append(str(VENDOR_ROOT))
 
-from daystrom_dml.dml_adapter import DMLAdapter
+if find_spec("daystrom_dml.dml_adapter") is not None:
+    from daystrom_dml.dml_adapter import DMLAdapter
+else:
+    DMLAdapter = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -27,6 +31,9 @@ class DMLMemoryLayer:
         self.error: Optional[str] = None
         self._adapter: Optional[DMLAdapter] = None
         if not enabled:
+            return
+        if DMLAdapter is None:
+            self.error = "daystrom_dml is not available"
             return
         try:
             root = storage_dir or (Path.cwd() / "data" / "dml")
