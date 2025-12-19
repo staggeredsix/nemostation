@@ -109,21 +109,10 @@ def _openai_client() -> OpenAI:
 
 
 def _summary_settings() -> Dict[str, Any]:
-    max_tokens_raw = os.getenv("DML_SUMMARY_MAX_TOKENS", "512")
-    temperature_raw = os.getenv("DML_SUMMARY_TEMPERATURE", "0.2")
-    enable_thinking = os.getenv("DML_SUMMARY_ENABLE_THINKING", "false").lower() == "true"
-    try:
-        max_tokens = min(512, int(max_tokens_raw))
-    except (TypeError, ValueError):
-        max_tokens = 512
-    try:
-        temperature = float(temperature_raw)
-    except (TypeError, ValueError):
-        temperature = 0.2
     return {
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "enable_thinking": enable_thinking,
+        "max_tokens": 512,
+        "temperature": 0,
+        "enable_thinking": False,
     }
 
 
@@ -160,15 +149,16 @@ def _build_cookbook_prompt(payload: RunReportRequest) -> str:
     )
 
 
+_EMPTY_SUMMARY_LOGGED = False
+
+
 def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int]:
     start = time.perf_counter()
     settings = _summary_settings()
     model = os.getenv("DML_OPENAI_MODEL", "").strip()
     if not model:
         raise RuntimeError("DML_OPENAI_MODEL is not set")
-    extra_body = None
-    if not settings["enable_thinking"]:
-        extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+    extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
     client = _openai_client()
     response = client.chat.completions.create(
         model=model,
@@ -183,7 +173,19 @@ def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int]:
         max_tokens=settings["max_tokens"],
         extra_body=extra_body,
     )
-    summary = response.choices[0].message.content or ""
+    message = response.choices[0].message
+    summary = (message.content or "").strip()
+    if not summary:
+        summary = (getattr(message, "reasoning_content", None) or "").strip()
+    if not summary:
+        global _EMPTY_SUMMARY_LOGGED
+        if not _EMPTY_SUMMARY_LOGGED:
+            _EMPTY_SUMMARY_LOGGED = True
+            try:
+                logger.warning("Empty cookbook summary response: %s", response.model_dump_json())
+            except Exception:  # noqa: BLE001
+                logger.warning("Empty cookbook summary response: %s", response)
+        summary = _fallback_cookbook(payload).strip()
     latency_ms = int((time.perf_counter() - start) * 1000)
     return summary.strip(), latency_ms
 
@@ -197,13 +199,13 @@ def _fallback_cookbook(payload: RunReportRequest) -> str:
             "WHAT WORKED:",
             f"- Run status: {status}",
             "WHAT FAILED:",
-            "- LLM cookbook summary was empty; fall back to basic run metadata.",
+            "- No model summary available; using basic run metadata.",
             "DECISION HEURISTICS:",
             f"- Goal: {payload.goal}",
             "PITFALLS:",
-            "- Ensure DML summariser returns content; check model responses.",
+            "- Review run trace for missing steps or tool errors.",
             "NEXT TIME TRY:",
-            "- Retry cookbook summarisation or inspect run trace for insights.",
+            "- Re-run summarisation or provide more detailed run metadata.",
             "KEY ARTIFACTS / LINKS (if present):",
             f"- RUN_ID: {payload.run_id}",
             f"- META: {meta_json}",
@@ -282,13 +284,14 @@ def get_cookbook(request: CookbookGetRequest) -> CookbookGetResponse:
         for item in items
         if (item.meta or {}).get("kind") == "cookbook"
         and (item.meta or {}).get("scenario_key") == request.scenario_key
+        and not (item.meta or {}).get("superseded", False)
     ]
     if not candidates:
         latency_ms = int((time.perf_counter() - start) * 1000)
         return CookbookGetResponse(found=False, cookbook_text="", sources=[], latency_ms=latency_ms)
     latest = max(candidates, key=lambda item: item.timestamp)
     meta = latest.meta or {}
-    sources = meta.get("sources") or [str(latest.id)]
+    sources = meta.get("cookbook_sources") or meta.get("sources") or [str(latest.id)]
     latency_ms = int((time.perf_counter() - start) * 1000)
     return CookbookGetResponse(
         found=True,
@@ -327,14 +330,21 @@ def ingest_run_report(request: RunReportRequest) -> RunReportResponse:
             kind="run_report",
             meta=report_meta,
         )
+        for item in adapter.store.items():
+            if (item.meta or {}).get("kind") != "cookbook":
+                continue
+            if (item.meta or {}).get("scenario_key") != request.scenario_key:
+                continue
+            item.meta = dict(item.meta or {})
+            item.meta["superseded"] = True
+            item.meta["superseded_at"] = time.time()
         cookbook_text, summary_latency_ms = _summarize_cookbook(request)
-        if not cookbook_text.strip():
-            logger.warning("Cookbook summary empty for run_id=%s; using fallback.", request.run_id)
-            cookbook_text = _fallback_cookbook(request)
         cookbook_meta = {
             "scenario_key": request.scenario_key,
             "run_id": request.run_id,
             "sources": [str(report_item.id)],
+            "cookbook_sources": [str(report_item.id)],
+            "summary_latency_ms": summary_latency_ms,
             "kind": "cookbook",
         }
         cookbook_item = adapter.ingest_memory(
@@ -353,3 +363,34 @@ def ingest_run_report(request: RunReportRequest) -> RunReportResponse:
         summary_id=str(cookbook_item.id),
         summary_latency_ms=summary_latency_ms,
     )
+
+
+@app.get("/debug/scenario/{scenario_key}")
+def debug_scenario(scenario_key: str) -> Dict[str, Any]:
+    items = adapter.store.items()
+    run_reports = [
+        item
+        for item in items
+        if (item.meta or {}).get("kind") == "run_report"
+        and (item.meta or {}).get("scenario_key") == scenario_key
+    ]
+    run_reports_sorted = sorted(run_reports, key=lambda item: item.timestamp, reverse=True)
+    cookbooks = [
+        item
+        for item in items
+        if (item.meta or {}).get("kind") == "cookbook"
+        and (item.meta or {}).get("scenario_key") == scenario_key
+        and not (item.meta or {}).get("superseded", False)
+    ]
+    cookbook_latest = max(cookbooks, key=lambda item: item.timestamp) if cookbooks else None
+    cookbook_meta = cookbook_latest.meta or {} if cookbook_latest else {}
+    return {
+        "run_report_count": len(run_reports),
+        "latest_run_report_ids": [str(item.id) for item in run_reports_sorted[:5]],
+        "cookbook_exists": {
+            "id": str(cookbook_latest.id) if cookbook_latest else None,
+            "timestamp": cookbook_latest.timestamp if cookbook_latest else None,
+            "chars": len(cookbook_latest.text or "") if cookbook_latest else 0,
+        },
+        "last_summary_latency_ms": cookbook_meta.get("summary_latency_ms"),
+    }
