@@ -5,6 +5,9 @@ from typing import List, Tuple
 
 WORKSPACE_ROOT = "/workspace"
 MAX_OUTPUT_BYTES = 200_000
+DEFAULT_COMMAND_TIMEOUT_S = 120
+CONTAINER_PREFIX = "nemotron-playground-"
+PLAYGROUND_USER = "1000:1000"
 
 ALLOWLIST = {
     "bash",
@@ -65,6 +68,14 @@ def validate_command(cmd: List[str]) -> Tuple[bool, str | None]:
         if arg.startswith("/") and not arg.startswith(WORKSPACE_ROOT):
             return False, "Absolute paths must remain under /workspace."
 
+    return True, None
+
+
+def validate_container_name(name: str) -> Tuple[bool, str | None]:
+    if not name:
+        return False, "Container name is required."
+    if not name.startswith(CONTAINER_PREFIX):
+        return False, f"Container name must start with '{CONTAINER_PREFIX}'."
     return True, None
 
 

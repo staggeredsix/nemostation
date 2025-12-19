@@ -106,6 +106,17 @@ body, .gradio-container {
 }
 .server-pill.up { background: #113927; color: var(--success); }
 .server-pill.down { background: #3f1616; color: var(--danger); }
+.banner {
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+.banner.warning {
+  background: #3f1616;
+  color: var(--danger);
+  border: 1px solid #5a1f1f;
+}
 .agent-output {
   background: #0f1724;
   border: 1px solid #1f2a3a;
