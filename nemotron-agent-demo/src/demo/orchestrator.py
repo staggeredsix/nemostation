@@ -168,14 +168,17 @@ def run_demo_stream(
         "log": playground_log,
         "auto_remove": bool(auto_remove_playground),
         "ready_for_removal": False,
+        "workspace_host": "",
+        "workspace_container": "",
     }
     if use_playground:
-        playground_status = playground_manager.ensure_playground(playground_image, playground_name, repo_mount=None)
+        playground_status = playground_manager.ensure_playground(playground_image, playground_name, run_id, repo_mount=None)
         playground_info.update(
             {
                 "status": playground_status.get("status", "unknown"),
                 "error": playground_status.get("error"),
-                "workspace": playground_status.get("workspace"),
+                "workspace_host": playground_status.get("workspace_host"),
+                "workspace_container": playground_status.get("workspace_container"),
                 "warning": playground_status.get("warning"),
                 "image": playground_status.get("image", playground_image),
                 "requested_image": playground_status.get("requested_image", playground_image),
@@ -248,7 +251,8 @@ def run_demo_stream(
         "playground": {
             "name": playground_info.get("name"),
             "image": playground_info.get("image"),
-            "workspace": playground_info.get("workspace"),
+            "workspace_host": playground_info.get("workspace_host"),
+            "workspace_container": playground_info.get("workspace_container"),
             "enabled": playground_info.get("enabled"),
         },
     }
@@ -280,13 +284,19 @@ def run_demo_stream(
             max_tokens = 384 if fast else 640
             if stage_name == "aggregator":
                 max_tokens = 320 if fast else 512
+            system_messages = list(base_system_messages)
+            if long_run_mode and use_playground and stage_name == "coder":
+                system_messages.append(
+                    "All generated files must be written under /workspace inside the playground container. "
+                    "Use tool steps to create files and run commands."
+                )
             result = call_agent(
                 stage_name,
                 goal,
                 scenario,
                 max_tokens=max_tokens,
                 extra_context=extra_context,
-                system_messages=base_system_messages or None,
+                system_messages=system_messages or None,
             )
             elapsed_ms = (time.perf_counter() - stage_start) * 1000
             tokens = estimate_tokens(result.output)
@@ -308,20 +318,35 @@ def run_demo_stream(
                 tool_requests = _extract_tool_requests(result.output)
                 tool_entries: List[Dict[str, Any]] = []
                 for request in tool_requests[:MAX_TOOL_REQUESTS_PER_STAGE]:
-                    if request.get("tool") != "playground.exec":
-                        continue
-                    cmd = request.get("cmd")
-                    timeout_s = int(request.get("timeout_s", 60))
-                    if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
-                        entry = {
-                            "cmd": str(cmd),
-                            "exit_code": 125,
-                            "stdout": "",
-                            "stderr": "Invalid command format. Expected list[str].",
-                        }
+                    tool_name = request.get("tool")
+                    if tool_name == "playground.exec":
+                        cmd = request.get("cmd")
+                        timeout_s = int(request.get("timeout_s", 60))
+                        if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+                            entry = {
+                                "cmd": str(cmd),
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid command format. Expected list[str].",
+                            }
+                        else:
+                            entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
+                            entry["cmd"] = " ".join(cmd)
+                    elif tool_name == "playground.write_file":
+                        path = request.get("path")
+                        content = request.get("content")
+                        if not isinstance(path, str) or not isinstance(content, str):
+                            entry = {
+                                "cmd": f"write_file {path}",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid write_file payload. Expected path/content strings.",
+                            }
+                        else:
+                            entry = playground_manager.write_file(playground_name, path, content)
+                            entry["cmd"] = f"write_file {path}"
                     else:
-                        entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
-                        entry["cmd"] = " ".join(cmd)
+                        continue
                     tool_entries.append(entry)
                     tool_context_chunks.append(_format_tool_context(entry))
                     playground_log.append(entry)
@@ -336,6 +361,29 @@ def run_demo_stream(
                         tool_context_chunks,
                     )
                     stage_trace["playground_commands"] = [fixed_entry]
+                if stage_name == "planner":
+                    skeleton_entries = []
+                    skeleton_entries.append(
+                        _run_playground_command(
+                            playground_name,
+                            ["bash", "-lc", "mkdir -p /workspace/app /workspace/tests"],
+                            playground_log,
+                            tool_context_chunks,
+                        )
+                    )
+                    skeleton_entries.append(
+                        _run_playground_command(
+                            playground_name,
+                            [
+                                "bash",
+                                "-lc",
+                                "cat <<'EOF' > /workspace/README.md\n# Workspace\n\nInitialized by long-run mode.\nEOF",
+                            ],
+                            playground_log,
+                            tool_context_chunks,
+                        )
+                    )
+                    stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
             trace["stages"][stage_name] = stage_trace
             _update_stage(
                 stages,
