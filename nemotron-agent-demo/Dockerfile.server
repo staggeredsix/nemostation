@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:25.11-py3
+FROM nvcr.io/nvidia/nemo:25.11.01
 
 WORKDIR /app
 
@@ -11,7 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+RUN nvcc --version
+
 RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir numpy && \
     python -m pip install --no-cache-dir \
       "transformers==4.57.3" \
       "huggingface_hub>=0.36.0" \
@@ -21,6 +24,8 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
       "mamba-ssm>=2.2.0" \
       "causal-conv1d>=1.4.0" \
       pydantic
+
+RUN python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 
 COPY server /app/server
 

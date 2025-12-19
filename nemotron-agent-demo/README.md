@@ -25,8 +25,9 @@ Or directly:
 docker compose up --build
 ```
 This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
-- **Transformers server** (`nemotron-server`): nvcr.io/nvidia/pytorch:25.11-py3 with Transformers 4.57.x, served at `http://localhost:8000/v1`
+- **Transformers server** (`nemotron-server`): nvcr.io/nvidia/nemo:25.11.01 with Transformers 4.57.x, served at `http://localhost:8000/v1`
 - **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
+  - Note: the server image must include CUDA + Python 3.11 so `mamba-ssm` installs from wheels.
 
 ### Rebuild the server image
 If the server base image or Python dependencies change, rebuild with no cache:
