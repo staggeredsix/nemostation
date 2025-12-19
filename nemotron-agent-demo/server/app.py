@@ -3,6 +3,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import sys
 import threading
 import time
 import uuid
@@ -80,60 +81,64 @@ def _load_model() -> None:
         )
         _model = AutoModelForCausalLM.from_pretrained(
             MODEL_ID,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             trust_remote_code=True,
             device_map="auto",
             token=HF_TOKEN,
         )
         _model.eval()
         _nemotron_cache_class = _resolve_nemotron_cache_class(_model)
-        logging.info("Nemotron cache enabled: %s", bool(_nemotron_cache_class))
+        if _nemotron_cache_class is None:
+            logging.info("Nemotron cache enabled: False (class not found)")
+        else:
+            logging.info("Nemotron cache enabled: True")
 
 
 def _resolve_nemotron_cache_class(model: Any) -> type | None:
-    cache_class = _resolve_cache_from_known_module()
-    if cache_class is not None:
-        return cache_class
-
     module_name = getattr(model.__class__, "__module__", "")
-    cache_class = _resolve_cache_from_module(module_name)
+    model_module = _import_module_safely(module_name)
+    cache_class = _resolve_cache_from_module_object(model_module)
     if cache_class is not None:
         return cache_class
 
-    for attr_name in ("model", "base_model"):
-        candidate = getattr(model, attr_name, None)
-        cache_class = _resolve_cache_from_attribute(candidate)
+    for loaded_name, loaded_module in list(sys.modules.items()):
+        if not loaded_name or not loaded_name.endswith("modeling_nemotron_h"):
+            continue
+        cache_class = _resolve_cache_from_module_object(loaded_module)
         if cache_class is not None:
             return cache_class
     return None
 
 
-def _resolve_cache_from_known_module() -> type | None:
-    module_name = f"transformers_modules.{_normalize_module_name(MODEL_ID)}.modeling_nemotron_h"
-    return _resolve_cache_from_module(module_name)
-
-
 def _resolve_cache_from_module(module_name: str) -> type | None:
     if not module_name:
         return None
-    if importlib.util.find_spec(module_name) is None:
+    module = _import_module_safely(module_name)
+    return _resolve_cache_from_module_object(module)
+
+
+def _import_module_safely(module_name: str) -> Any | None:
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except ModuleNotFoundError:
         return None
-    module = importlib.import_module(module_name)
-    return getattr(module, "NemotronHHybridDynamicCache", None)
-
-
-def _resolve_cache_from_attribute(candidate: Any) -> type | None:
-    if candidate is None:
+    except (ImportError, Exception):
         return None
-    cache_class = getattr(candidate, "NemotronHHybridDynamicCache", None)
-    if cache_class is not None:
-        return cache_class
-    module_name = getattr(candidate.__class__, "__module__", "")
-    return _resolve_cache_from_module(module_name)
+    if spec is None:
+        return None
+    try:
+        return importlib.import_module(module_name)
+    except (ModuleNotFoundError, ImportError, Exception):
+        return None
 
 
-def _normalize_module_name(repo_id: str) -> str:
-    return repo_id.replace("-", "_").replace(".", "_").replace("/", ".")
+def _resolve_cache_from_module_object(module: Any) -> type | None:
+    if module is None:
+        return None
+    try:
+        return getattr(module, "NemotronHHybridDynamicCache", None)
+    except Exception:
+        return None
 
 
 def _generate_with_cache(
