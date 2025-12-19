@@ -36,6 +36,7 @@ services:
       OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
+      DML_BASE_URL: http://dml-service:9001
       PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
     ports:
       - "7860:7860"
@@ -47,3 +48,23 @@ services:
     depends_on:
       nemotron-trtllm:
         condition: service_healthy
+      dml-service:
+        condition: service_healthy
+
+  dml-service:
+    build:
+      context: ..
+      dockerfile: nemotron-agent-demo/server/dml_service/Dockerfile
+    container_name: dml-service
+    restart: unless-stopped
+    environment:
+      DML_STORAGE_DIR: /data/dml
+      PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
+    volumes:
+      - ./data/dml:/data/dml
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9001/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

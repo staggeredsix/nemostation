@@ -96,7 +96,7 @@ Container-first is preferred; local runs still expect a GPU and will download we
   - **Use Default** clears the override file and flips the badge back to DEFAULT. A diff summary shows when an override diverges from the default template.
 
 ## Daystrom Memory Lattice (DML)
-The DML layer adds **persistent memory** across runs and a **transparent retrieval report** per stage so you can see exactly which memories were used.
+The DML layer adds **persistent memory** across runs and a **transparent retrieval report** per stage so you can see exactly which memories were used. It runs as a separate `dml-service` container with FAISS-backed storage and real embeddings.
 
 ### Enable/disable
 - In the UI, toggle **DML Memory ON / OFF**.
@@ -104,9 +104,13 @@ The DML layer adds **persistent memory** across runs and a **transparent retriev
 
 ### Storage location
 - DML data is stored in `./data/dml` (persisted across runs).
+- Start services with `docker compose up --build` to launch `dml-service` alongside the UI.
 
 ### Reset memory
 - Stop the UI, then delete the directory: `rm -rf ./data/dml`
+
+### Verify the service
+- Inside the Compose network: `curl http://dml-service:9001/health`
 
 ## Run the CLI demo
 ```bash

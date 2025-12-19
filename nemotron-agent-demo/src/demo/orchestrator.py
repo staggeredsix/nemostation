@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Generator, List, Optional
 
-from src.memory.dml_layer import DMLMemoryLayer, DML_AVAILABLE
+from src.memory import dml_http_client
 
 from .agents import AgentResult, call_agent
 from .metrics import StageMetrics, compute_throughput, estimate_tokens
@@ -109,21 +109,15 @@ def run_demo_stream(
     stage_order.append("aggregator")
     stages = [StageState(name=s.title()) for s in stage_order]
 
-    dml_layer = None
     dml_error: Optional[str] = None
+    dml_enabled = False
     if use_dml:
-        if DML_AVAILABLE:
-            try:
-                dml_layer = DMLMemoryLayer(enabled=True)
-            except Exception as exc:  # noqa: BLE001
-                dml_error = str(exc)
-        else:
-            dml_error = "DML not available"
+        dml_enabled, dml_error = dml_http_client.check_health()
     dml_info = {
         "requested": use_dml,
-        "enabled": bool(use_dml and dml_layer and dml_layer.enabled),
+        "enabled": bool(use_dml and dml_enabled),
         "top_k": dml_top_k,
-        "error": dml_error or (dml_layer.error if dml_layer else None),
+        "error": dml_error,
     }
 
     start_time = time.perf_counter()
@@ -149,12 +143,12 @@ def run_demo_stream(
             dml_payload = _default_dml_payload(enabled=bool(use_dml))
             system_messages: List[str] = []
             if use_dml:
-                if dml_layer and dml_layer.enabled:
+                if dml_enabled:
                     try:
                         retrieval_prompt = f"Stage: {stage_name}\nGoal: {goal}\nScenario: {scenario or 'general'}"
                         if extra_context:
                             retrieval_prompt += f"\nContext:\n{extra_context}"
-                        report = dml_layer.retrieval_report(retrieval_prompt, top_k=dml_top_k)
+                        report = dml_http_client.retrieval_report(retrieval_prompt, top_k=dml_top_k)
                         entries = report.entries
                         retrieved_ids = [
                             (entry.get("meta", {}).get("doc_path") or entry.get("id"))
@@ -173,10 +167,12 @@ def run_demo_stream(
                         retrieved_ids_by_stage[stage_name] = retrieved_ids
                         if report.preamble:
                             system_messages.append(f"DML_MEMORY_CONTEXT:\n{report.preamble}")
-                    except Exception as exc:  # noqa: BLE001
+                    except dml_http_client.DMLServiceError as exc:
+                        dml_info["enabled"] = False
+                        dml_info["error"] = str(exc)
                         dml_payload["error"] = str(exc)
                 else:
-                    dml_payload["error"] = dml_error or (dml_layer.error if dml_layer else "DML not available")
+                    dml_payload["error"] = dml_error or "DML not available"
             _update_stage(stages, stage_name, dml=dml_payload)
             result = call_agent(
                 stage_name,
@@ -224,7 +220,7 @@ def run_demo_stream(
 
     total_ms = (time.perf_counter() - start_time) * 1000
     final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
-    if use_dml and dml_layer and dml_layer.enabled:
+    if use_dml and dml_enabled:
         summary_lines = [
             f"Goal: {goal}",
             f"Final answer excerpt: {_compact_text(final_text, 360)}",
@@ -241,7 +237,10 @@ def run_demo_stream(
             "agent_outputs": {stage: _compact_text(result.output, 240) for stage, result in outputs.items()},
             "retrieved_ids_by_stage": retrieved_ids_by_stage,
         }
-        dml_layer.ingest("\n".join(summary_lines), meta=meta)
+        try:
+            dml_http_client.ingest("\n".join(summary_lines), meta=meta)
+        except dml_http_client.DMLServiceError:
+            pass
     yield _serialize(stages, goal, scenario, final=final_text, total_ms=total_ms, dml=dml_info)
 
 
