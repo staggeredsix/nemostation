@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
+import base64
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
 
 from . import policy
@@ -94,13 +95,23 @@ def status(name: str) -> Dict:
     }
 
 
-def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -> Dict:
+def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[str] = None) -> Dict:
     error = _validate_container_name(name)
     if error:
         return {"name": name, "exists": False, "running": False, "status": "blocked", "error": error}
+    workspace_host = (WORKSPACE_ROOT / run_id).resolve()
+    workspace_container = policy.WORKSPACE_ROOT
+    workspace_host.mkdir(parents=True, exist_ok=True)
     current = status(name)
     if current.get("exists") and current.get("running"):
-        current.update({"image": image, "workspace": str(WORKSPACE_ROOT / name)})
+        current.update(
+            {
+                "image": image,
+                "workspace_host": str(workspace_host),
+                "workspace_container": workspace_container,
+                "container": name,
+            }
+        )
         return current
     if current.get("exists") and not current.get("running"):
         result = _run_docker(["start", name])
@@ -111,12 +122,17 @@ def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -
             current.update({"error": _docker_error(result, "failed to start container")})
             return current
         current = status(name)
-        current.update({"image": image, "workspace": str(WORKSPACE_ROOT / name)})
+        current.update(
+            {
+                "image": image,
+                "workspace_host": str(workspace_host),
+                "workspace_container": workspace_container,
+                "container": name,
+            }
+        )
         return current
 
-    workspace_host = WORKSPACE_ROOT / name
-    workspace_host.mkdir(parents=True, exist_ok=True)
-    volume_args = ["-v", f"{workspace_host.resolve()}:/workspace"]
+    volume_args = ["-v", f"{workspace_host}:/workspace"]
     if repo_mount:
         volume_args += ["-v", f"{Path(repo_mount).resolve()}:/workspace/app"]
 
@@ -137,6 +153,8 @@ def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -
             "no-new-privileges",
             "--user",
             policy.PLAYGROUND_USER,
+            "-w",
+            workspace_container,
             *volume_args,
             resolved_image,
             "sleep",
@@ -165,7 +183,9 @@ def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -
     current.update(
         {
             "image": resolved_image,
-            "workspace": str(workspace_host),
+            "workspace_host": str(workspace_host),
+            "workspace_container": workspace_container,
+            "container": name,
             "warning": warning,
             "requested_image": image,
         }
@@ -216,6 +236,43 @@ def exec_cmd(name: str, cmd: List[str], timeout_s: int = policy.DEFAULT_COMMAND_
     }
 
 
+def write_file(name: str, path: str, content: str) -> Dict:
+    name_error = _validate_container_name(name)
+    if name_error:
+        return {"exit_code": 126, "stdout": "", "stderr": name_error}
+    if not isinstance(path, str) or not path:
+        return {"exit_code": 126, "stdout": "", "stderr": "Path must be a non-empty string."}
+    if not isinstance(content, str):
+        return {"exit_code": 126, "stdout": "", "stderr": "Content must be a string."}
+    try:
+        resolved = PurePosixPath(path)
+    except ValueError:
+        return {"exit_code": 126, "stdout": "", "stderr": "Invalid path format."}
+    if not resolved.is_absolute():
+        return {"exit_code": 126, "stdout": "", "stderr": "Path must be absolute under /workspace."}
+    if ".." in resolved.parts:
+        return {"exit_code": 126, "stdout": "", "stderr": "Parent directory traversal is not allowed."}
+    workspace_root = PurePosixPath(policy.WORKSPACE_ROOT)
+    if resolved != workspace_root and workspace_root not in resolved.parents:
+        return {"exit_code": 126, "stdout": "", "stderr": "Path must be under /workspace."}
+
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    payload = json.dumps({"path": str(resolved), "data": encoded})
+    cmd = [
+        "python",
+        "-c",
+        (
+            "import base64, json, pathlib;"
+            f"payload=json.loads({payload!r});"
+            "path=pathlib.Path(payload['path']);"
+            "path.parent.mkdir(parents=True, exist_ok=True);"
+            "path.write_bytes(base64.b64decode(payload['data']));"
+            "print(f'Wrote {path}')"
+        ),
+    ]
+    return exec_cmd(name, cmd)
+
+
 def remove_playground(name: str) -> Dict:
     error = _validate_container_name(name)
     if error:
@@ -225,4 +282,26 @@ def remove_playground(name: str) -> Dict:
         return {"ok": False, "error": "docker not available"}
     if result.returncode != 0:
         return {"ok": False, "error": _docker_error(result, "failed to remove container")}
+    return {"ok": True, "error": None}
+
+
+def remove_workspace(path: str) -> Dict:
+    if not path:
+        return {"ok": False, "error": "Workspace path is required."}
+    workspace_root = WORKSPACE_ROOT.resolve()
+    try:
+        resolved = Path(path).resolve()
+    except FileNotFoundError:
+        return {"ok": False, "error": "Workspace path not found."}
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError:
+        return {"ok": False, "error": "Workspace path is outside the allowed root."}
+    if resolved == workspace_root:
+        return {"ok": False, "error": "Refusing to delete workspace root."}
+    if not resolved.exists():
+        return {"ok": False, "error": "Workspace path not found."}
+    import shutil
+
+    shutil.rmtree(resolved)
     return {"ok": True, "error": None}

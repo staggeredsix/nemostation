@@ -201,11 +201,21 @@ def render_playground_status(state: Dict) -> str:
     warning = playground.get("warning")
     image = playground.get("image")
     requested_image = playground.get("requested_image")
+    workspace_host = playground.get("workspace_host")
+    workspace_container = playground.get("workspace_container")
     warning_html = f"<div class='banner warning'>{warning}</div>" if warning else ""
     error_html = f"<div class='memory-error'>Error: {error}</div>" if error else ""
     requested_html = ""
     if requested_image and requested_image != image:
         requested_html = f"<div>Requested image: {requested_image}</div>"
+    workspace_html = ""
+    if workspace_host or workspace_container:
+        workspace_html = (
+            "<div class='workspace-paths'>"
+            f"<div>Host workspace: {workspace_host or '—'}</div>"
+            f"<div>Container workspace: {workspace_container or '—'}</div>"
+            "</div>"
+        )
     return (
         "<div class='card'>"
         "<h3>Playground</h3>"
@@ -214,6 +224,7 @@ def render_playground_status(state: Dict) -> str:
         f"<div>Container: {playground.get('name')}</div>"
         f"<div>Image: {image}</div>"
         f"{requested_html}"
+        f"{workspace_html}"
         f"{error_html}"
         "</div>"
     )
@@ -284,9 +295,12 @@ def stream_runner(
         playground_status = render_playground_status(state)
         playground_log = render_playground_log(state)
         playground_name = state.get("playground", {}).get("name", "")
+        playground_workspace_host = state.get("playground", {}).get("workspace_host", "")
+        playground_workspace_container = state.get("playground", {}).get("workspace_container", "")
         ready_for_removal = bool(state.get("playground", {}).get("ready_for_removal"))
         status = str(state.get("playground", {}).get("status", "")).lower()
         remove_btn_update = gr.update(visible=ready_for_removal, interactive=status not in {"removed", "missing"})
+        delete_btn_update = gr.update(visible=ready_for_removal and bool(playground_workspace_host))
         yield (
             metrics_html,
             timeline_html,
@@ -302,8 +316,11 @@ def stream_runner(
             ingest_panel,
             playground_status,
             playground_name,
+            playground_workspace_host,
+            playground_workspace_container,
             playground_log,
             remove_btn_update,
+            delete_btn_update,
             playground_name,
         )
 
@@ -338,7 +355,9 @@ def build_ui() -> gr.Blocks:
                 playground_status = gr.HTML("", label="Playground status")
                 playground_name_display = gr.Textbox(label="Playground container", interactive=False)
                 remove_playground_btn = gr.Button("Remove Playground Container", variant="stop", visible=False)
+                delete_workspace_btn = gr.Button("Delete Workspace", variant="stop", visible=False)
                 remove_status = gr.Markdown(value="")
+                delete_status = gr.Markdown(value="")
             with gr.Column(scale=2):
                 cookbook_panel = gr.HTML(elem_classes=["card"])
                 ingest_panel = gr.HTML(elem_classes=["card"])
@@ -358,6 +377,9 @@ def build_ui() -> gr.Blocks:
                     dml_cookbook_tab = gr.HTML()
                     dml_ingest_tab = gr.HTML()
                 with gr.Tab("Playground"):
+                    with gr.Row():
+                        playground_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
+                        playground_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
                     gr.Markdown("Playground command execution log (truncated).")
                     playground_log = gr.Textbox(label="Playground log", lines=12)
 
@@ -539,6 +561,13 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=True, interactive=not result.get("ok")),
             )
 
+        def remove_workspace(path: str):
+            if not path:
+                return "No workspace path available.", gr.update(visible=True, interactive=False)
+            result = playground_manager.remove_workspace(path)
+            message = "Workspace deleted." if result.get("ok") else f"Workspace delete failed: {result.get('error')}"
+            return message, gr.update(visible=True, interactive=not result.get("ok"))
+
         demo.load(fn=docker_status_banner, inputs=None, outputs=docker_banner)
         demo.load(fn=update_status, inputs=None, outputs=server_status)
 
@@ -581,8 +610,11 @@ def build_ui() -> gr.Blocks:
                 dml_ingest_tab,
                 playground_status,
                 playground_name_display,
+                playground_workspace_host,
+                playground_workspace_container,
                 playground_log,
                 remove_playground_btn,
+                delete_workspace_btn,
                 playground_name_state,
             ],
             show_progress=True,
@@ -592,6 +624,12 @@ def build_ui() -> gr.Blocks:
             fn=remove_playground_container,
             inputs=[playground_name_state],
             outputs=[playground_status, remove_status, remove_playground_btn],
+        )
+
+        delete_workspace_btn.click(
+            fn=remove_workspace,
+            inputs=[playground_workspace_host],
+            outputs=[delete_status, delete_workspace_btn],
         )
 
     return demo
