@@ -59,9 +59,20 @@ services:
     restart: unless-stopped
     environment:
       DML_STORAGE_DIR: /data/dml
+      DML_LLM_BACKEND: openai
+      DML_OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
+      DML_OPENAI_API_KEY: "null"
+      DML_OPENAI_MODEL: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      DML_SUMMARY_MAX_TOKENS: 256
+      DML_SUMMARY_TEMPERATURE: 0.2
+      DML_SUMMARY_TOP_P: 0.95
+      DML_SUMMARY_ENABLE_THINKING: "false"
       PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
     volumes:
       - ./data/dml:/data/dml
+    depends_on:
+      nemotron-trtllm:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9001/health >/dev/null || exit 1"]
       interval: 10s
