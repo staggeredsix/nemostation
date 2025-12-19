@@ -26,6 +26,9 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 CSS_PATH = STATIC_DIR / "style.css"
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://nemotron-server:8000/v1").rstrip("/")
+DOCKER_PLAYGROUND_WARNING = (
+    "<div class='banner warning'>Playground requires Docker CLI + /var/run/docker.sock mount.</div>"
+)
 
 
 def ping_server() -> bool:
@@ -45,13 +48,12 @@ def docker_status_banner() -> str:
             timeout=3,
         )
     except FileNotFoundError:
-        return "<div class='banner warning'>Docker CLI not installed in the UI container.</div>"
+        return DOCKER_PLAYGROUND_WARNING
     except subprocess.TimeoutExpired:
-        return "<div class='banner warning'>Docker CLI timed out while checking availability.</div>"
+        return DOCKER_PLAYGROUND_WARNING
 
     if result.returncode != 0:
-        detail = (result.stderr.strip() or result.stdout.strip() or "Docker unavailable.")
-        return f"<div class='banner warning'>Docker unavailable: {detail}</div>"
+        return DOCKER_PLAYGROUND_WARNING
     return ""
 
 
