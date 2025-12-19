@@ -1,4 +1,6 @@
 import importlib
+import importlib.util
+import inspect
 import logging
 import os
 import threading
@@ -23,6 +25,7 @@ _tokenizer = None
 _model = None
 _model_lock = threading.Lock()
 _cache_warmed = False
+_nemotron_cache_class = None
 
 
 def _check_mamba_ssm() -> None:
@@ -62,7 +65,7 @@ def _warm_cache() -> None:
 
 
 def _load_model() -> None:
-    global _tokenizer, _model
+    global _tokenizer, _model, _nemotron_cache_class
     if _model is not None and _tokenizer is not None:
         return
     with _model_lock:
@@ -83,6 +86,116 @@ def _load_model() -> None:
             token=HF_TOKEN,
         )
         _model.eval()
+        _nemotron_cache_class = _resolve_nemotron_cache_class(_model)
+        logging.info("Nemotron cache enabled: %s", bool(_nemotron_cache_class))
+
+
+def _resolve_nemotron_cache_class(model: Any) -> type | None:
+    cache_class = _resolve_cache_from_known_module()
+    if cache_class is not None:
+        return cache_class
+
+    module_name = getattr(model.__class__, "__module__", "")
+    cache_class = _resolve_cache_from_module(module_name)
+    if cache_class is not None:
+        return cache_class
+
+    for attr_name in ("model", "base_model"):
+        candidate = getattr(model, attr_name, None)
+        cache_class = _resolve_cache_from_attribute(candidate)
+        if cache_class is not None:
+            return cache_class
+    return None
+
+
+def _resolve_cache_from_known_module() -> type | None:
+    module_name = f"transformers_modules.{_normalize_module_name(MODEL_ID)}.modeling_nemotron_h"
+    return _resolve_cache_from_module(module_name)
+
+
+def _resolve_cache_from_module(module_name: str) -> type | None:
+    if not module_name:
+        return None
+    if importlib.util.find_spec(module_name) is None:
+        return None
+    module = importlib.import_module(module_name)
+    return getattr(module, "NemotronHHybridDynamicCache", None)
+
+
+def _resolve_cache_from_attribute(candidate: Any) -> type | None:
+    if candidate is None:
+        return None
+    cache_class = getattr(candidate, "NemotronHHybridDynamicCache", None)
+    if cache_class is not None:
+        return cache_class
+    module_name = getattr(candidate.__class__, "__module__", "")
+    return _resolve_cache_from_module(module_name)
+
+
+def _normalize_module_name(repo_id: str) -> str:
+    return repo_id.replace("-", "_").replace(".", "_").replace("/", ".")
+
+
+def _generate_with_cache(
+    input_ids: torch.Tensor, generate_kwargs: dict[str, Any]
+) -> torch.Tensor:
+    if _nemotron_cache_class is None:
+        return _model.generate(input_ids, **generate_kwargs)
+
+    try:
+        cache = _nemotron_cache_class()
+    except Exception as exc:
+        logging.warning("Cache init failed, running without cache: %s", exc)
+        return _model.generate(input_ids, **generate_kwargs)
+
+    try:
+        return _model.generate(input_ids, past_key_values=cache, **generate_kwargs)
+    except TypeError as exc:
+        last_exc = exc
+
+    try:
+        return _model.generate(input_ids, cache=cache, **generate_kwargs)
+    except TypeError as exc:
+        last_exc = exc
+
+    logging.warning("Cache init failed, running without cache: %s", last_exc)
+    return _greedy_decode_with_cache(input_ids, cache, generate_kwargs)
+
+
+def _greedy_decode_with_cache(
+    input_ids: torch.Tensor, cache: Any, generate_kwargs: dict[str, Any]
+) -> torch.Tensor:
+    signature = inspect.signature(_model.forward)
+    cache_arg = None
+    if "past_key_values" in signature.parameters:
+        cache_arg = "past_key_values"
+    elif "cache" in signature.parameters:
+        cache_arg = "cache"
+
+    use_cache_supported = "use_cache" in signature.parameters
+    eos_token_id = generate_kwargs.get("eos_token_id")
+    max_new_tokens = int(generate_kwargs.get("max_new_tokens", 0))
+    generated = []
+    next_input_ids = input_ids
+    for _ in range(max_new_tokens):
+        forward_kwargs: dict[str, Any] = {}
+        if cache_arg is not None:
+            forward_kwargs[cache_arg] = cache
+        if use_cache_supported:
+            forward_kwargs["use_cache"] = True
+        outputs = _model.forward(next_input_ids, **forward_kwargs)
+        logits = outputs.logits[:, -1, :]
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        generated.append(next_token)
+        next_input_ids = next_token
+        updated_cache = getattr(outputs, "past_key_values", None) or getattr(outputs, "cache", None)
+        if updated_cache is not None:
+            cache = updated_cache
+        if eos_token_id is not None and torch.eq(next_token, eos_token_id).all():
+            break
+    if generated:
+        return torch.cat([input_ids, torch.cat(generated, dim=-1)], dim=-1)
+    return input_ids
 
 
 def _extract_text(content: Any) -> str:
@@ -152,7 +265,7 @@ async def chat_completions(request: Request) -> dict:
         generate_kwargs["top_p"] = top_p
 
     with torch.inference_mode():
-        output_ids = _model.generate(input_ids, **generate_kwargs)
+        output_ids = _generate_with_cache(input_ids, generate_kwargs)
 
     generated_tokens = output_ids[0][input_ids.shape[-1] :]
     text = _tokenizer.decode(generated_tokens, skip_special_tokens=True)
