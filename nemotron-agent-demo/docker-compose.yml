@@ -84,7 +84,7 @@ services:
       retries: 30
       start_period: 20s
 
-  playground:
+  nemotron-playground-image:
     build:
       context: ..
       dockerfile: nemotron-agent-demo/playground/Dockerfile

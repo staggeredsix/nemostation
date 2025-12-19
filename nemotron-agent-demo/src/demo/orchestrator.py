@@ -143,8 +143,10 @@ def run_demo_stream(
         "enabled": bool(use_playground),
         "name": playground_name if use_playground else "",
         "image": playground_image,
+        "requested_image": playground_image,
         "status": "disabled" if not use_playground else "pending",
         "error": None,
+        "warning": None,
         "log": playground_log,
         "auto_remove": bool(auto_remove_playground),
         "ready_for_removal": False,
@@ -156,6 +158,9 @@ def run_demo_stream(
                 "status": playground_status.get("status", "unknown"),
                 "error": playground_status.get("error"),
                 "workspace": playground_status.get("workspace"),
+                "warning": playground_status.get("warning"),
+                "image": playground_status.get("image", playground_image),
+                "requested_image": playground_status.get("requested_image", playground_image),
             }
         )
 
