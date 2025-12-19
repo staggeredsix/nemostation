@@ -1,3 +1,4 @@
+import importlib
 import logging
 import os
 import threading
@@ -22,6 +23,18 @@ _tokenizer = None
 _model = None
 _model_lock = threading.Lock()
 _cache_warmed = False
+
+
+def _check_mamba_ssm() -> None:
+    try:
+        importlib.import_module("mamba_ssm")
+        logging.info("mamba_ssm import check: OK")
+    except Exception as exc:
+        logging.error(
+            "mamba_ssm import check failed. Install mamba-ssm and causal-conv1d. Error: %s",
+            exc,
+        )
+        raise
 
 
 def _warm_cache() -> None:
@@ -89,6 +102,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 def _on_startup() -> None:
+    _check_mamba_ssm()
     _warm_cache()
     logging.info("Server ready")
 

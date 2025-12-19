@@ -2,13 +2,24 @@ FROM nvcr.io/nvidia/pytorch:25.11-py3
 
 WORKDIR /app
 
+ENV MAX_JOBS=8
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    ninja-build \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN python -m pip install --no-cache-dir --upgrade pip && \
     python -m pip install --no-cache-dir \
-      transformers==4.57.3 \
+      "transformers==4.57.3" \
+      "huggingface_hub>=0.36.0" \
       accelerate \
-      huggingface_hub \
       fastapi \
       "uvicorn[standard]" \
+      "mamba-ssm>=2.2.0" \
+      "causal-conv1d>=1.4.0" \
       pydantic
 
 COPY server /app/server
