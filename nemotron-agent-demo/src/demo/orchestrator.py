@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 import uuid
 from copy import deepcopy
@@ -8,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
 
 from src.memory import dml_http_client
+from src.playground import manager as playground_manager
 
 from .agents import AgentResult, call_agent
 from .metrics import StageMetrics, compute_throughput, estimate_tokens
@@ -28,6 +31,8 @@ class StageState:
 
 
 DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
+LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
+MAX_TOOL_REQUESTS_PER_STAGE = 3
 
 
 def _initial_state(goal: str, scenario: Optional[str], fast: bool) -> Dict:
@@ -51,6 +56,7 @@ def _serialize(
     scenario: Optional[str],
     final: str,
     total_ms: float,
+    playground: Optional[Dict] = None,
     dml: Optional[Dict] = None,
 ) -> Dict:
     completed = [s for s in stages if s.status == "done"]
@@ -68,8 +74,40 @@ def _serialize(
             "approx_ttft_ms": approx_ttft,
         },
         "final": final,
+        "playground": playground or {},
         "dml": dml or {},
     }
+
+
+def _is_long_run(goal: str, scenario: Optional[str]) -> bool:
+    if LONG_RUN_MARKER.lower() in goal.lower():
+        return True
+    if scenario and LONG_RUN_MARKER.lower() in scenario.lower():
+        return True
+    return False
+
+
+def _extract_tool_requests(text: str) -> List[Dict[str, Any]]:
+    blocks = re.findall(r"```json\\s*(\\{.*?\\})\\s*```", text, flags=re.DOTALL)
+    requests: List[Dict[str, Any]] = []
+    for block in blocks:
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("tool"):
+            requests.append(payload)
+    return requests
+
+
+def _format_tool_context(entry: Dict[str, Any]) -> str:
+    return (
+        "Playground command result:\n"
+        f"$ {entry.get('cmd')}\n"
+        f"Exit code: {entry.get('exit_code')}\n"
+        f"Stdout:\n{entry.get('stdout')}\n"
+        f"Stderr:\n{entry.get('stderr')}\n"
+    )
 
 
 def _update_stage(stages: List[StageState], name: str, **kwargs) -> None:
@@ -86,6 +124,9 @@ def run_demo_stream(
     scenario: Optional[str] = None,
     use_dml: bool = False,
     dml_top_k: int = 6,
+    use_playground: bool = False,
+    playground_image: str = "nemotron-playground:latest",
+    auto_remove_playground: bool = False,
 ) -> Generator[Dict, None, None]:
     stages: List[StageState] = []
     stage_order = ["planner", "coder", "reviewer"]
@@ -93,6 +134,30 @@ def run_demo_stream(
         stage_order.append("ops")
     stage_order.append("aggregator")
     stages = [StageState(name=s.title()) for s in stage_order]
+
+    run_id = str(uuid.uuid4())
+    long_run_mode = _is_long_run(goal, scenario)
+    playground_name = f"nemotron-playground-{run_id.split('-')[0]}"
+    playground_log: List[Dict[str, Any]] = []
+    playground_info: Dict[str, Any] = {
+        "enabled": bool(use_playground),
+        "name": playground_name if use_playground else "",
+        "image": playground_image,
+        "status": "disabled" if not use_playground else "pending",
+        "error": None,
+        "log": playground_log,
+        "auto_remove": bool(auto_remove_playground),
+        "ready_for_removal": False,
+    }
+    if use_playground:
+        playground_status = playground_manager.ensure_playground(playground_image, playground_name, repo_mount=None)
+        playground_info.update(
+            {
+                "status": playground_status.get("status", "unknown"),
+                "error": playground_status.get("error"),
+                "workspace": playground_status.get("workspace"),
+            }
+        )
 
     scenario_key = scenario or "general"
     dml_error: Optional[str] = None
@@ -144,11 +209,11 @@ def run_demo_stream(
     }
 
     start_time = time.perf_counter()
-    yield _serialize(stages, goal, scenario, final="", total_ms=0, dml=dml_info)
+    yield _serialize(stages, goal, scenario, final="", total_ms=0, playground=playground_info, dml=dml_info)
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
-    run_id = str(uuid.uuid4())
+    tool_context_chunks: List[str] = []
     trace: Dict[str, Dict[str, Any]] = {
         "stages": {},
         "timings": {},
@@ -157,6 +222,12 @@ def run_demo_stream(
             "cookbook_found": cookbook_info["found"],
             "cookbook_sources": cookbook_info["sources"],
         },
+        "playground": {
+            "name": playground_info.get("name"),
+            "image": playground_info.get("image"),
+            "workspace": playground_info.get("workspace"),
+            "enabled": playground_info.get("enabled"),
+        },
     }
     base_system_messages: List[str] = []
     if dml_enabled and cookbook_info["found"] and cookbook_info["cookbook_text"]:
@@ -164,7 +235,15 @@ def run_demo_stream(
 
     for stage_name in stage_order:
         _update_stage(stages, stage_name, status="running")
-        yield _serialize(stages, goal, scenario, final="", total_ms=(time.perf_counter() - start_time) * 1000, dml=dml_info)
+        yield _serialize(
+            stages,
+            goal,
+            scenario,
+            final="",
+            total_ms=(time.perf_counter() - start_time) * 1000,
+            playground=playground_info,
+            dml=dml_info,
+        )
 
         stage_start = time.perf_counter()
         try:
@@ -172,6 +251,9 @@ def run_demo_stream(
             if stage_name != "planner":
                 context_parts = [f"{k.title()} Output:\n{v.output}" for k, v in outputs.items()]
                 extra_context = "\n\n".join(context_parts)
+            if tool_context_chunks:
+                tool_context = "\n\n".join(tool_context_chunks)
+                extra_context = "\n\n".join(filter(None, [extra_context, f"Playground Command Log:\n{tool_context}"]))
             max_tokens = 384 if fast else 640
             if stage_name == "aggregator":
                 max_tokens = 320 if fast else 512
@@ -188,7 +270,7 @@ def run_demo_stream(
             tok_s = compute_throughput(tokens, elapsed_ms)
             metrics = StageMetrics(ms=elapsed_ms, ttft_ms=elapsed_ms, tokens=tokens, tok_s=tok_s)
             outputs[stage_name] = result
-            trace["stages"][stage_name] = {
+            stage_trace: Dict[str, Any] = {
                 "output": result.output,
                 "error": None,
                 "ms": metrics.ms,
@@ -199,6 +281,30 @@ def run_demo_stream(
                 "system_messages": base_system_messages,
                 "max_tokens": max_tokens,
             }
+            if long_run_mode and use_playground:
+                tool_requests = _extract_tool_requests(result.output)
+                tool_entries: List[Dict[str, Any]] = []
+                for request in tool_requests[:MAX_TOOL_REQUESTS_PER_STAGE]:
+                    if request.get("tool") != "playground.exec":
+                        continue
+                    cmd = request.get("cmd")
+                    timeout_s = int(request.get("timeout_s", 60))
+                    if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+                        entry = {
+                            "cmd": str(cmd),
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid command format. Expected list[str].",
+                        }
+                    else:
+                        entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
+                        entry["cmd"] = " ".join(cmd)
+                    tool_entries.append(entry)
+                    tool_context_chunks.append(_format_tool_context(entry))
+                    playground_log.append(entry)
+                if tool_entries:
+                    stage_trace["tool_requests"] = tool_entries
+            trace["stages"][stage_name] = stage_trace
             _update_stage(
                 stages,
                 stage_name,
@@ -236,15 +342,44 @@ def run_demo_stream(
         total_ms = (time.perf_counter() - start_time) * 1000
         final_text = outputs.get("aggregator", AgentResult(stage_name, "")).output if outputs else ""
         trace["timings"]["total_ms"] = total_ms
-        yield _serialize(stages, goal, scenario, final=final_text, total_ms=total_ms, dml=dml_info)
+        yield _serialize(
+            stages,
+            goal,
+            scenario,
+            final=final_text,
+            total_ms=total_ms,
+            playground=playground_info,
+            dml=dml_info,
+        )
 
         if failed:
+            if use_playground:
+                playground_info["ready_for_removal"] = True
+                if auto_remove_playground:
+                    removal = playground_manager.remove_playground(playground_name)
+                    playground_info["remove_result"] = removal
+                    if removal.get("ok"):
+                        playground_info["status"] = "removed"
+                    else:
+                        playground_info["status"] = "error"
+                        playground_info["error"] = removal.get("error")
+                yield _serialize(
+                    stages,
+                    goal,
+                    scenario,
+                    final=final_text,
+                    total_ms=total_ms,
+                    playground=playground_info,
+                    dml=dml_info,
+                )
             if outputs:
                 break
             return
 
     total_ms = (time.perf_counter() - start_time) * 1000
     final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
+    if playground_log:
+        trace["playground"]["log"] = playground_log
     if use_dml and dml_enabled:
         run_report = {
             "scenario_key": scenario_key,
@@ -253,6 +388,7 @@ def run_demo_stream(
             "trace": trace,
             "final": final_text,
             "success": not failed,
+            "artifacts": [{"type": "playground_command", **entry} for entry in playground_log],
             "meta": {
                 "scenario": scenario,
                 "fast": fast,
@@ -277,7 +413,25 @@ def run_demo_stream(
             ingest_info.update({"error": str(exc)})
         dml_info["counters"]["dml_get_calls_per_run"] = dml_get_calls
         dml_info["counters"]["dml_ingest_calls_per_run"] = dml_ingest_calls
-    yield _serialize(stages, goal, scenario, final=final_text, total_ms=total_ms, dml=dml_info)
+    if use_playground:
+        playground_info["ready_for_removal"] = True
+        if auto_remove_playground:
+            removal = playground_manager.remove_playground(playground_name)
+            playground_info["remove_result"] = removal
+            if removal.get("ok"):
+                playground_info["status"] = "removed"
+            else:
+                playground_info["status"] = "error"
+                playground_info["error"] = removal.get("error")
+    yield _serialize(
+        stages,
+        goal,
+        scenario,
+        final=final_text,
+        total_ms=total_ms,
+        playground=playground_info,
+        dml=dml_info,
+    )
 
 
 def run_demo(
@@ -286,8 +440,20 @@ def run_demo(
     scenario: Optional[str] = None,
     use_dml: bool = False,
     dml_top_k: int = 6,
+    use_playground: bool = False,
+    playground_image: str = "nemotron-playground:latest",
+    auto_remove_playground: bool = False,
 ) -> Dict:
     last_state = {}
-    for state in run_demo_stream(goal, fast=fast, scenario=scenario, use_dml=use_dml, dml_top_k=dml_top_k):
+    for state in run_demo_stream(
+        goal,
+        fast=fast,
+        scenario=scenario,
+        use_dml=use_dml,
+        dml_top_k=dml_top_k,
+        use_playground=use_playground,
+        playground_image=playground_image,
+        auto_remove_playground=auto_remove_playground,
+    ):
         last_state = deepcopy(state)
     return last_state

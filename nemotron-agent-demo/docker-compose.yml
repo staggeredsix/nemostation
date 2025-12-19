@@ -79,3 +79,11 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
+
+  playground:
+    build:
+      context: ..
+      dockerfile: nemotron-agent-demo/playground/Dockerfile
+    image: nemotron-playground:latest
+    profiles:
+      - playground
