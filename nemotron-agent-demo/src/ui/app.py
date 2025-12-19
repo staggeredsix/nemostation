@@ -133,13 +133,13 @@ def build_ui() -> gr.Blocks:
                     metrics_card = gr.HTML()
                     timeline = gr.HTML(elem_classes=["card"])
                 with gr.Tab("Agent Outputs"):
-                    planner_box = gr.Textbox(label="Planner", lines=6, show_copy_button=True)
-                    coder_box = gr.Textbox(label="Coder", lines=6, show_copy_button=True)
-                    reviewer_box = gr.Textbox(label="Reviewer", lines=6, show_copy_button=True)
-                    ops_box = gr.Textbox(label="Ops", lines=6, show_copy_button=True)
-                    aggregator_box = gr.Textbox(label="Aggregator", lines=6, show_copy_button=True)
+                    planner_box = gr.Textbox(label="Planner", lines=6)
+                    coder_box = gr.Textbox(label="Coder", lines=6)
+                    reviewer_box = gr.Textbox(label="Reviewer", lines=6)
+                    ops_box = gr.Textbox(label="Ops", lines=6)
+                    aggregator_box = gr.Textbox(label="Aggregator", lines=6)
                 with gr.Tab("Final Answer"):
-                    final_box = gr.Textbox(label="Final", lines=8, show_copy_button=True)
+                    final_box = gr.Textbox(label="Final", lines=8)
 
         with gr.Tab("Prompts"):
             with gr.Tab("Goal Presets"):
