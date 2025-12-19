@@ -8,3 +8,5 @@ huggingface_hub
 fastapi
 uvicorn[standard]
 pydantic
+faiss-cpu
+sentence-transformers
