@@ -23,7 +23,7 @@ from src.demo.prompts import (
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CSS_PATH = STATIC_DIR / "style.css"
 
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://nemotron-server:8000/v1").rstrip("/")
 
 
 def ping_server() -> bool:
@@ -110,7 +110,7 @@ def stream_runner(goal: str, scenario: str, fast: bool):
 def build_ui() -> gr.Blocks:
     css = CSS_PATH.read_text()
     with gr.Blocks(css=css, theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# Nemotron-3 Nano Agentic Demo — HF + vLLM")
+        gr.Markdown("# Nemotron-3 Nano Agentic Demo — HF + Transformers")
         with gr.Row():
             with gr.Column(scale=1):
                 with gr.Row():

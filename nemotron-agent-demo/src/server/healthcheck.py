@@ -23,7 +23,7 @@ def check(host: str = "localhost", port: int = 8000, timeout: int = 30) -> bool:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Poll vLLM server for readiness")
+    parser = argparse.ArgumentParser(description="Poll server for readiness")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout", type=int, default=30)

@@ -1,17 +1,15 @@
 services:
-  nemotron-vllm:
-    image: nvcr.io/nvidia/nemo:25.11.01
-    container_name: nemotron-vllm
+  nemotron-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: nemotron-server
     restart: unless-stopped
-    entrypoint: ["/bin/bash", "/scripts/vllm_entrypoint.sh"]
     gpus: all
     environment:
       MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
       HF_TOKEN: ${HF_TOKEN:-}
-      HF_HOME: ${HF_HOME:-/root/.cache/huggingface}
-      RMS_NORM_EPS: ${RMS_NORM_EPS:-}
-      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
-      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      OPENAI_MODEL_NAME: ${OPENAI_MODEL_NAME:-}
     ipc: host
     shm_size: "8gb"
     ulimits:
@@ -19,11 +17,11 @@ services:
       stack: 67108864
     volumes:
       - ./_hf_cache:/root/.cache/huggingface
-      - ./scripts:/scripts:ro
+      - ./server:/app/server
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/v1/models"]
       interval: 10s
       timeout: 10s
       retries: 300
@@ -36,7 +34,7 @@ services:
     container_name: nemotron-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://nemotron-vllm:8000/v1
+      OPENAI_BASE_URL: http://nemotron-server:8000/v1
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
     ports:
@@ -46,5 +44,5 @@ services:
       - ./context:/app/context:ro
       - ./prompts:/app/prompts:ro
     depends_on:
-      nemotron-vllm:
+      nemotron-server:
         condition: service_healthy
