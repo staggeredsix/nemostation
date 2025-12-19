@@ -12,22 +12,8 @@ if [[ -n "${HF_TOKEN}" ]]; then
   export HUGGINGFACE_HUB_TOKEN="${HF_TOKEN}"
 fi
 
-ensure_hf_deps() {
-  python - <<'PY'
-import importlib
-missing = []
-for name in ("huggingface_hub", "transformers"):
-    if importlib.util.find_spec(name) is None:
-        missing.append(name)
-if missing:
-    raise SystemExit("missing")
-PY
-}
-
-if ! ensure_hf_deps; then
-  echo "Installing Hugging Face dependencies..." >&2
-  pip install --no-cache-dir huggingface_hub transformers
-fi
+pip uninstall -y importlib || true
+pip install -U "vllm>=0.12.0" huggingface_hub transformers
 
 echo "Warming model cache…"
 snapshot_path="$(python - <<'PY'
@@ -72,59 +58,17 @@ PY
 )"
 echo "Warm complete"
 
-config_path="${snapshot_path}/config.json"
-if [[ -f "${config_path}" ]]; then
-  echo "Inspecting model config at ${config_path}"
-  CONFIG_PATH="${config_path}" python - <<'PY'
-import json
-import os
+mkdir -p /workspace
+wget -O /workspace/nano_v3_reasoning_parser.py \
+  https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/resolve/main/nano_v3_reasoning_parser.py
 
-config_path = os.environ["CONFIG_PATH"]
-with open(config_path, "r", encoding="utf-8") as handle:
-    config = json.load(handle)
-
-for key in sorted(config.keys()):
-    if "norm" in key or "eps" in key:
-        print(f"config[{key}] = {config[key]!r}")
-PY
-else
-  echo "WARNING: config.json not found at ${config_path}" >&2
-fi
-
-if [[ -z "${RMS_NORM_EPS:-}" ]]; then
-  if [[ -f "${config_path}" ]]; then
-    RMS_NORM_EPS="$(
-      CONFIG_PATH="${config_path}" python - <<'PY'
-import json
-import os
-
-config_path = os.environ["CONFIG_PATH"]
-with open(config_path, "r", encoding="utf-8") as handle:
-    config = json.load(handle)
-
-if "rms_norm_eps" in config:
-    value = config["rms_norm_eps"]
-elif "rms_norm_epsilon" in config and "rms_norm_eps" not in config:
-    value = config["rms_norm_epsilon"]
-else:
-    value = 1e-6
-
-print(value)
-PY
-    )"
-  else
-    RMS_NORM_EPS="1e-6"
-  fi
-fi
-
-export RMS_NORM_EPS
-HF_OVERRIDES="$(printf '{"rms_norm_eps": %s}' "${RMS_NORM_EPS}")"
-
-exec python -m vllm.entrypoints.openai.api_server \
-  --host 0.0.0.0 \
+exec vllm serve --model "${MODEL_ID}" \
+  --max-num-seqs 8 \
+  --tensor-parallel-size 1 \
+  --max-model-len 262144 \
   --port 8000 \
-  --model "${MODEL_ID}" \
   --trust-remote-code \
-  --hf-overrides "${HF_OVERRIDES}" \
-  --max-model-len 16384 \
-  --gpu-memory-utilization 0.90
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser-plugin /workspace/nano_v3_reasoning_parser.py \
+  --reasoning-parser nano_v3
