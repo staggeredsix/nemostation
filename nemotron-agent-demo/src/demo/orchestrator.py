@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 import time
+import uuid
 from copy import deepcopy
-from dataclasses import dataclass, field
-from typing import Dict, Generator, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Generator, List, Optional
 
 from src.memory import dml_http_client
 
 from .agents import AgentResult, call_agent
 from .metrics import StageMetrics, compute_throughput, estimate_tokens
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,7 +25,6 @@ class StageState:
     tokens: int = 0
     output: str = ""
     error: Optional[str] = None
-    dml: Dict = field(default_factory=dict)
 
 
 DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
@@ -77,24 +80,6 @@ def _update_stage(stages: List[StageState], name: str, **kwargs) -> None:
             break
 
 
-def _default_dml_payload(enabled: bool) -> Dict:
-    return {
-        "enabled": enabled,
-        "retrieved_ids": [],
-        "latency_ms": 0,
-        "token_estimate": 0,
-        "entries": [],
-        "error": None,
-    }
-
-
-def _compact_text(text: str, limit: int = 420) -> str:
-    cleaned = (text or "").strip()
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[: limit - 3].rstrip() + "..."
-
-
 def run_demo_stream(
     goal: str,
     fast: bool = False,
@@ -109,15 +94,53 @@ def run_demo_stream(
     stage_order.append("aggregator")
     stages = [StageState(name=s.title()) for s in stage_order]
 
+    scenario_key = scenario or "general"
     dml_error: Optional[str] = None
     dml_enabled = False
+    dml_get_calls = 0
+    dml_ingest_calls = 0
+    cookbook_info = {
+        "found": False,
+        "cookbook_text": "",
+        "sources": [],
+        "latency_ms": 0,
+    }
+    ingest_info = {
+        "ok": False,
+        "ingested_id": "",
+        "summary_id": "",
+        "summary_latency_ms": 0,
+        "error": None,
+    }
     if use_dml:
-        dml_enabled, dml_error = dml_http_client.check_health()
+        try:
+            dml_get_calls += 1
+            if dml_get_calls > 1:
+                logger.error("dml_get_calls_per_run exceeded: %d", dml_get_calls)
+            cookbook = dml_http_client.get_cookbook(scenario_key, goal, dml_top_k)
+            dml_enabled = True
+            cookbook_info.update(
+                {
+                    "found": cookbook.found,
+                    "cookbook_text": cookbook.cookbook_text,
+                    "sources": cookbook.sources,
+                    "latency_ms": cookbook.latency_ms,
+                }
+            )
+        except dml_http_client.DMLServiceError as exc:
+            dml_error = str(exc)
+            dml_enabled = False
     dml_info = {
         "requested": use_dml,
         "enabled": bool(use_dml and dml_enabled),
         "top_k": dml_top_k,
         "error": dml_error,
+        "cookbook": cookbook_info,
+        "ingest": ingest_info,
+        "counters": {
+            "dml_get_calls_per_run": dml_get_calls,
+            "dml_ingest_calls_per_run": dml_ingest_calls,
+        },
     }
 
     start_time = time.perf_counter()
@@ -125,7 +148,19 @@ def run_demo_stream(
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
-    retrieved_ids_by_stage: Dict[str, List[str]] = {}
+    run_id = str(uuid.uuid4())
+    trace: Dict[str, Dict[str, Any]] = {
+        "stages": {},
+        "timings": {},
+        "errors": [],
+        "dml": {
+            "cookbook_found": cookbook_info["found"],
+            "cookbook_sources": cookbook_info["sources"],
+        },
+    }
+    base_system_messages: List[str] = []
+    if dml_enabled and cookbook_info["found"] and cookbook_info["cookbook_text"]:
+        base_system_messages.append(f"DML_COOKBOOK_GUIDANCE:\n{cookbook_info['cookbook_text']}")
 
     for stage_name in stage_order:
         _update_stage(stages, stage_name, status="running")
@@ -140,50 +175,30 @@ def run_demo_stream(
             max_tokens = 384 if fast else 640
             if stage_name == "aggregator":
                 max_tokens = 320 if fast else 512
-            dml_payload = _default_dml_payload(enabled=bool(use_dml))
-            system_messages: List[str] = []
-            if use_dml:
-                if dml_enabled:
-                    try:
-                        retrieval_prompt = f"Stage: {stage_name}\nGoal: {goal}\nScenario: {scenario or 'general'}"
-                        if extra_context:
-                            retrieval_prompt += f"\nContext:\n{extra_context}"
-                        report = dml_http_client.retrieval_report(retrieval_prompt, top_k=dml_top_k)
-                        entries = report.entries
-                        retrieved_ids = [
-                            entry.get("meta", {}).get("doc_path") or entry.get("id") for entry in entries
-                        ]
-                        retrieved_ids = [str(value) for value in retrieved_ids if value is not None]
-                        dml_payload.update(
-                            {
-                                "retrieved_ids": retrieved_ids,
-                                "latency_ms": report.latency_ms,
-                                "token_estimate": report.tokens,
-                                "entries": entries,
-                                "error": report.error,
-                            }
-                        )
-                        retrieved_ids_by_stage[stage_name] = retrieved_ids
-                        if report.preamble:
-                            system_messages.append(f"DML_MEMORY_CONTEXT:\n{report.preamble}")
-                    except dml_http_client.DMLServiceError as exc:
-                        dml_payload["error"] = str(exc)
-                else:
-                    dml_payload["error"] = dml_error or "DML not available"
-            _update_stage(stages, stage_name, dml=dml_payload)
             result = call_agent(
                 stage_name,
                 goal,
                 scenario,
                 max_tokens=max_tokens,
                 extra_context=extra_context,
-                system_messages=system_messages or None,
+                system_messages=base_system_messages or None,
             )
             elapsed_ms = (time.perf_counter() - stage_start) * 1000
             tokens = estimate_tokens(result.output)
             tok_s = compute_throughput(tokens, elapsed_ms)
             metrics = StageMetrics(ms=elapsed_ms, ttft_ms=elapsed_ms, tokens=tokens, tok_s=tok_s)
             outputs[stage_name] = result
+            trace["stages"][stage_name] = {
+                "output": result.output,
+                "error": None,
+                "ms": metrics.ms,
+                "ttft_ms": metrics.ttft_ms,
+                "tok_s": metrics.tok_s,
+                "tokens": metrics.tokens,
+                "extra_context": extra_context,
+                "system_messages": base_system_messages,
+                "max_tokens": max_tokens,
+            }
             _update_stage(
                 stages,
                 stage_name,
@@ -196,6 +211,18 @@ def run_demo_stream(
             )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = (time.perf_counter() - stage_start) * 1000
+            trace["stages"][stage_name] = {
+                "output": "",
+                "error": str(exc),
+                "ms": elapsed_ms,
+                "ttft_ms": elapsed_ms,
+                "tok_s": 0.0,
+                "tokens": 0,
+                "extra_context": extra_context,
+                "system_messages": base_system_messages,
+                "max_tokens": max_tokens,
+            }
+            trace["errors"].append({"stage": stage_name, "error": str(exc)})
             _update_stage(
                 stages,
                 stage_name,
@@ -208,6 +235,7 @@ def run_demo_stream(
 
         total_ms = (time.perf_counter() - start_time) * 1000
         final_text = outputs.get("aggregator", AgentResult(stage_name, "")).output if outputs else ""
+        trace["timings"]["total_ms"] = total_ms
         yield _serialize(stages, goal, scenario, final=final_text, total_ms=total_ms, dml=dml_info)
 
         if failed:
@@ -218,26 +246,37 @@ def run_demo_stream(
     total_ms = (time.perf_counter() - start_time) * 1000
     final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
     if use_dml and dml_enabled:
-        summary_lines = [
-            f"Goal: {goal}",
-            f"Final answer excerpt: {_compact_text(final_text, 360)}",
-            "Agent outputs:",
-        ]
-        for stage, result in outputs.items():
-            summary_lines.append(f"- {stage.title()}: {_compact_text(result.output, 240)}")
-        summary_lines.append("Retrieved memory IDs:")
-        for stage, ids in retrieved_ids_by_stage.items():
-            summary_lines.append(f"- {stage.title()}: {', '.join(map(str, ids)) if ids else 'None'}")
-        meta = {
+        run_report = {
+            "scenario_key": scenario_key,
             "goal": goal,
-            "final_excerpt": _compact_text(final_text, 360),
-            "agent_outputs": {stage: _compact_text(result.output, 240) for stage, result in outputs.items()},
-            "retrieved_ids_by_stage": retrieved_ids_by_stage,
+            "run_id": run_id,
+            "trace": trace,
+            "final": final_text,
+            "success": not failed,
+            "meta": {
+                "scenario": scenario,
+                "fast": fast,
+                "cookbook_sources": cookbook_info["sources"],
+            },
         }
         try:
-            dml_http_client.ingest("\n".join(summary_lines), meta=meta)
-        except dml_http_client.DMLServiceError:
-            pass
+            dml_ingest_calls += 1
+            if dml_ingest_calls > 1:
+                logger.error("dml_ingest_calls_per_run exceeded: %d", dml_ingest_calls)
+            result = dml_http_client.ingest_run_report(run_report)
+            ingest_info.update(
+                {
+                    "ok": result.ok,
+                    "ingested_id": result.ingested_id,
+                    "summary_id": result.summary_id,
+                    "summary_latency_ms": result.summary_latency_ms,
+                    "error": None,
+                }
+            )
+        except dml_http_client.DMLServiceError as exc:
+            ingest_info.update({"error": str(exc)})
+        dml_info["counters"]["dml_get_calls_per_run"] = dml_get_calls
+        dml_info["counters"]["dml_ingest_calls_per_run"] = dml_ingest_calls
     yield _serialize(stages, goal, scenario, final=final_text, total_ms=total_ms, dml=dml_info)
 
 

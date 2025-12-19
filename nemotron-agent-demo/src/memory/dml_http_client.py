@@ -55,14 +55,35 @@ class DMLReport:
     error: Optional[str] = None
 
 
-def _request(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+@dataclass
+class DMLCookbook:
+    found: bool
+    cookbook_text: str
+    sources: list[Any]
+    latency_ms: int
+
+
+@dataclass
+class DMLRunReportResult:
+    ok: bool
+    ingested_id: str
+    summary_id: str
+    summary_latency_ms: int
+
+
+def _request(
+    method: str,
+    path: str,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: Optional[Tuple[float, float]] = None,
+) -> Dict[str, Any]:
     url = f"{DML_BASE_URL}{path}"
     try:
         resp = _session.request(
             method,
             url,
             json=payload,
-            timeout=(DEFAULT_CONNECT_TIMEOUT_SEC, DEFAULT_READ_TIMEOUT_SEC),
+            timeout=timeout or (DEFAULT_CONNECT_TIMEOUT_SEC, DEFAULT_READ_TIMEOUT_SEC),
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
@@ -104,3 +125,24 @@ def build_preamble(prompt: str, top_k: int = 6) -> str:
     payload = {"prompt": prompt, "top_k": top_k}
     data = _request("POST", "/build_preamble", payload)
     return str(data.get("preamble", ""))
+
+
+def get_cookbook(scenario_key: str, goal: str, top_k: int = 6) -> DMLCookbook:
+    payload = {"scenario_key": scenario_key, "goal": goal, "top_k": top_k}
+    data = _request("POST", "/cookbook/get", payload, timeout=(3.0, 20.0))
+    return DMLCookbook(
+        found=bool(data.get("found", False)),
+        cookbook_text=str(data.get("cookbook_text", "")),
+        sources=list(data.get("sources", []) or []),
+        latency_ms=int(data.get("latency_ms", 0)),
+    )
+
+
+def ingest_run_report(payload: Dict[str, Any]) -> DMLRunReportResult:
+    data = _request("POST", "/run_report/ingest", payload, timeout=(3.0, 120.0))
+    return DMLRunReportResult(
+        ok=bool(data.get("ok", False)),
+        ingested_id=str(data.get("ingested_id", "")),
+        summary_id=str(data.get("summary_id", "")),
+        summary_latency_ms=int(data.get("summary_latency_ms", 0)),
+    )

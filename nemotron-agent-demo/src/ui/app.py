@@ -98,85 +98,67 @@ def render_agent_outputs(state: Dict) -> Dict[str, str]:
     return outputs
 
 
-def _memory_key(entry: Dict) -> str:
-    meta = entry.get("meta") or {}
-    return str(meta.get("doc_path") or entry.get("id") or "unknown")
-
-
-def _memory_score(entry: Dict) -> str:
-    for key in ("fidelity", "score", "semantic_score"):
-        value = entry.get(key)
-        if value is not None:
-            try:
-                return f"{float(value):.3f}"
-            except (TypeError, ValueError):
-                return str(value)
-    return ""
-
-
-def _render_memory_table(entries: List[Dict], latency_ms: int, token_estimate: int, error: str | None) -> str:
-    if error:
-        return f"<div class='memory-error'>DML error: {error}</div>"
-    if not entries:
-        return "<div class='memory-empty'>No memories retrieved.</div>"
-    header = ""
-    if latency_ms or token_estimate:
-        header = (
-            "<div class='memory-meta'>"
-            f"Latency: {latency_ms} ms · Token estimate: {token_estimate}"
-            "</div>"
+def render_cookbook_panel(state: Dict) -> str:
+    dml_info = state.get("dml", {})
+    if not dml_info.get("requested"):
+        return "<div class='card'><h3>Cookbook guidance (beginning of run)</h3><div>DML disabled.</div></div>"
+    if not dml_info.get("enabled"):
+        error = dml_info.get("error") or "DML unavailable"
+        return (
+            "<div class='card'><h3>Cookbook guidance (beginning of run)</h3>"
+            f"<div class='memory-error'>DML error: {error}</div></div>"
         )
-    rows = []
-    for entry in entries:
-        meta = entry.get("meta") or {}
-        doc_path = meta.get("doc_path", "")
-        memory_id = entry.get("id", "")
-        summary = entry.get("summary", "")
-        score = _memory_score(entry)
-        rows.append(
-            "<tr>"
-            f"<td>{memory_id}</td>"
-            f"<td>{doc_path}</td>"
-            f"<td>{summary}</td>"
-            f"<td>{score}</td>"
-            "</tr>"
+    cookbook = dml_info.get("cookbook", {})
+    found = cookbook.get("found", False)
+    sources = cookbook.get("sources", [])
+    latency_ms = cookbook.get("latency_ms", 0)
+    cookbook_text = cookbook.get("cookbook_text", "")
+    status = "yes" if found else "no"
+    source_text = ", ".join([str(source) for source in sources]) if sources else "None"
+    details = "<div class='memory-empty'>No cookbook guidance found.</div>"
+    if cookbook_text:
+        details = (
+            "<details>"
+            "<summary>Cookbook text (collapsed)</summary>"
+            f"<pre>{cookbook_text}</pre>"
+            "</details>"
         )
-    table = (
-        "<table class='memory-table'>"
-        "<thead><tr><th>Memory ID</th><th>Doc Path</th><th>Summary</th><th>Fidelity/Score</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody>"
-        "</table>"
+    return (
+        "<div class='card'>"
+        "<h3>Cookbook guidance (beginning of run)</h3>"
+        f"<div>Found: <strong>{status}</strong></div>"
+        f"<div>Sources: {source_text}</div>"
+        f"<div>Latency: {latency_ms} ms</div>"
+        f"{details}"
+        "</div>"
     )
-    return header + table
 
 
-def render_memory_access(state: Dict) -> Dict[str, str]:
-    per_stage = {}
-    all_entries: Dict[str, Dict] = {}
-    for stage in state.get("stages", []):
-        dml_info = stage.get("dml") or {}
-        entries = dml_info.get("entries", [])
-        for entry in entries:
-            key = _memory_key(entry)
-            if key not in all_entries:
-                all_entries[key] = entry
-        per_stage[stage["name"].lower()] = _render_memory_table(
-            entries,
-            int(dml_info.get("latency_ms", 0)),
-            int(dml_info.get("token_estimate", 0)),
-            dml_info.get("error"),
+def render_ingest_panel(state: Dict) -> str:
+    dml_info = state.get("dml", {})
+    if not dml_info.get("requested"):
+        return "<div class='card'><h3>New run report ingested (end of run)</h3><div>DML disabled.</div></div>"
+    if not dml_info.get("enabled"):
+        error = dml_info.get("error") or "DML unavailable"
+        return (
+            "<div class='card'><h3>New run report ingested (end of run)</h3>"
+            f"<div class='memory-error'>DML error: {error}</div></div>"
         )
-
-    combined_entries = list(all_entries.values())
-    combined_table = _render_memory_table(combined_entries, 0, 0, None)
-    return {
-        "all": combined_table,
-        "planner": per_stage.get("planner", ""),
-        "coder": per_stage.get("coder", ""),
-        "reviewer": per_stage.get("reviewer", ""),
-        "ops": per_stage.get("ops", ""),
-        "aggregator": per_stage.get("aggregator", ""),
-    }
+    ingest = dml_info.get("ingest", {})
+    if not ingest.get("ok"):
+        error = ingest.get("error") or "Pending"
+        return (
+            "<div class='card'><h3>New run report ingested (end of run)</h3>"
+            f"<div class='memory-empty'>Status: {error}</div></div>"
+        )
+    return (
+        "<div class='card'>"
+        "<h3>New run report ingested (end of run)</h3>"
+        f"<div>Summary ID: {ingest.get('summary_id')}</div>"
+        f"<div>Ingested ID: {ingest.get('ingested_id')}</div>"
+        f"<div>Summary latency: {ingest.get('summary_latency_ms')} ms</div>"
+        "</div>"
+    )
 
 
 def _default_prompt_source() -> str:
@@ -192,22 +174,21 @@ def stream_runner(goal: str, scenario: str, fast: bool, use_dml: bool, dml_top_k
         timeline_html = render_progress(state["stages"]) + render_timeline(state)
         outputs = render_agent_outputs(state)
         final_text = state.get("final", "")
-        memory_panels = render_memory_access(state)
+        cookbook_panel = render_cookbook_panel(state)
+        ingest_panel = render_ingest_panel(state)
         yield (
             metrics_html,
             timeline_html,
+            cookbook_panel,
+            ingest_panel,
             outputs.get("planner", ""),
             outputs.get("coder", ""),
             outputs.get("reviewer", ""),
             outputs.get("ops", ""),
             outputs.get("aggregator", ""),
             final_text,
-            memory_panels["all"],
-            memory_panels["planner"],
-            memory_panels["coder"],
-            memory_panels["reviewer"],
-            memory_panels["ops"],
-            memory_panels["aggregator"],
+            cookbook_panel,
+            ingest_panel,
         )
 
 
@@ -235,6 +216,8 @@ def build_ui() -> gr.Blocks:
                 run_btn = gr.Button("Run Demo", variant="primary")
                 server_status = gr.HTML("", label="Server status")
             with gr.Column(scale=2):
+                cookbook_panel = gr.HTML(elem_classes=["card"])
+                ingest_panel = gr.HTML(elem_classes=["card"])
                 with gr.Tab("Timeline"):
                     metrics_card = gr.HTML()
                     timeline = gr.HTML(elem_classes=["card"])
@@ -246,18 +229,10 @@ def build_ui() -> gr.Blocks:
                     aggregator_box = gr.Textbox(label="Aggregator", lines=6)
                 with gr.Tab("Final Answer"):
                     final_box = gr.Textbox(label="Final", lines=8)
-                with gr.Tab("Memory Access"):
-                    memory_all = gr.HTML(label="All accessed memories")
-                    with gr.Accordion("Planner"):
-                        memory_planner = gr.HTML()
-                    with gr.Accordion("Coder"):
-                        memory_coder = gr.HTML()
-                    with gr.Accordion("Reviewer"):
-                        memory_reviewer = gr.HTML()
-                    with gr.Accordion("Ops"):
-                        memory_ops = gr.HTML()
-                    with gr.Accordion("Aggregator"):
-                        memory_aggregator = gr.HTML()
+                with gr.Tab("DML Cookbook"):
+                    gr.Markdown("Cookbook guidance (beginning of run) and run report ingestion (end of run).")
+                    dml_cookbook_tab = gr.HTML()
+                    dml_ingest_tab = gr.HTML()
 
         with gr.Tab("Prompts"):
             with gr.Tab("Goal Presets"):
@@ -434,18 +409,16 @@ def build_ui() -> gr.Blocks:
             outputs=[
                 metrics_card,
                 timeline,
+                cookbook_panel,
+                ingest_panel,
                 planner_box,
                 coder_box,
                 reviewer_box,
                 ops_box,
                 aggregator_box,
                 final_box,
-                memory_all,
-                memory_planner,
-                memory_coder,
-                memory_reviewer,
-                memory_ops,
-                memory_aggregator,
+                dml_cookbook_tab,
+                dml_ingest_tab,
             ],
             show_progress=True,
         )
