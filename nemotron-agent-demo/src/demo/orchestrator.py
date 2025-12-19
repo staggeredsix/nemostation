@@ -151,10 +151,9 @@ def run_demo_stream(
                         report = dml_http_client.retrieval_report(retrieval_prompt, top_k=dml_top_k)
                         entries = report.entries
                         retrieved_ids = [
-                            (entry.get("meta", {}).get("doc_path") or entry.get("id"))
-                            for entry in entries
-                            if entry.get("meta", {}).get("doc_path") or entry.get("id")
+                            entry.get("meta", {}).get("doc_path") or entry.get("id") for entry in entries
                         ]
+                        retrieved_ids = [str(value) for value in retrieved_ids if value is not None]
                         dml_payload.update(
                             {
                                 "retrieved_ids": retrieved_ids,
@@ -168,8 +167,6 @@ def run_demo_stream(
                         if report.preamble:
                             system_messages.append(f"DML_MEMORY_CONTEXT:\n{report.preamble}")
                     except dml_http_client.DMLServiceError as exc:
-                        dml_info["enabled"] = False
-                        dml_info["error"] = str(exc)
                         dml_payload["error"] = str(exc)
                 else:
                     dml_payload["error"] = dml_error or "DML not available"
@@ -230,7 +227,7 @@ def run_demo_stream(
             summary_lines.append(f"- {stage.title()}: {_compact_text(result.output, 240)}")
         summary_lines.append("Retrieved memory IDs:")
         for stage, ids in retrieved_ids_by_stage.items():
-            summary_lines.append(f"- {stage.title()}: {', '.join(ids) if ids else 'None'}")
+            summary_lines.append(f"- {stage.title()}: {', '.join(map(str, ids)) if ids else 'None'}")
         meta = {
             "goal": goal,
             "final_excerpt": _compact_text(final_text, 360),
