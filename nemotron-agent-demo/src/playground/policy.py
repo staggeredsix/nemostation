@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import re
+from typing import List, Tuple
+
+WORKSPACE_ROOT = "/workspace"
+MAX_OUTPUT_BYTES = 200_000
+
+ALLOWLIST = {
+    "bash",
+    "python",
+    "pytest",
+    "pip",
+    "uvicorn",
+    "node",
+    "npm",
+    "make",
+    "ls",
+    "cat",
+    "sed",
+    "grep",
+}
+
+DENY_PATTERNS = [
+    r"rm\s+-rf",
+    r"\bmkfs\b",
+    r"\bdd\b",
+    r":\(\)\s*\{",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bmount\b",
+    r"\bumount\b",
+    r"chmod\s+777\s+/",
+    r"chown\s+-R\s+/",
+    r"curl\b[^\n]*\|\s*sh",
+    r"wget\b[^\n]*\|\s*sh",
+]
+
+
+class CommandRejectedError(ValueError):
+    """Raised when a playground command violates the policy."""
+
+
+def _command_string(cmd: List[str]) -> str:
+    return " ".join(cmd)
+
+
+def validate_command(cmd: List[str]) -> Tuple[bool, str | None]:
+    if not cmd:
+        return False, "Empty command list."
+
+    command_name = cmd[0].split("/")[-1]
+    if command_name not in ALLOWLIST:
+        return False, f"Command '{command_name}' is not in allowlist."
+
+    command_text = _command_string(cmd)
+    for pattern in DENY_PATTERNS:
+        if re.search(pattern, command_text):
+            return False, f"Command matches denied pattern: {pattern}"
+
+    if ".." in command_text:
+        return False, "Parent directory traversal is not allowed."
+
+    for arg in cmd[1:]:
+        if arg.startswith("/") and not arg.startswith(WORKSPACE_ROOT):
+            return False, "Absolute paths must remain under /workspace."
+
+    return True, None
+
+
+def clamp_output(text: str, max_bytes: int = MAX_OUTPUT_BYTES) -> str:
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= max_bytes:
+        return text
+    truncated = data[:max_bytes]
+    suffix = b"\n...output truncated..."
+    return (truncated + suffix).decode("utf-8", errors="replace")

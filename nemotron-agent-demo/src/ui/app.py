@@ -8,6 +8,7 @@ import gradio as gr
 import requests
 
 from src.demo.orchestrator import run_demo_stream
+from src.playground import manager as playground_manager
 from src.demo.prompts import (
     clear_override,
     delete_goal_preset,
@@ -161,21 +162,95 @@ def render_ingest_panel(state: Dict) -> str:
     )
 
 
+def render_playground_status(state: Dict) -> str:
+    playground = state.get("playground", {})
+    if not playground.get("enabled"):
+        return "<div class='card'><h3>Playground</h3><div>Playground disabled.</div></div>"
+    status = str(playground.get("status") or "unknown").lower()
+    if status == "running":
+        badge_status = "running"
+    elif status in {"removed", "exited"}:
+        badge_status = "done"
+    elif status in {"error", "missing"}:
+        badge_status = "failed"
+    else:
+        badge_status = "queued"
+    error = playground.get("error")
+    error_html = f"<div class='memory-error'>Error: {error}</div>" if error else ""
+    return (
+        "<div class='card'>"
+        "<h3>Playground</h3>"
+        f"<div>{badge(badge_status)} Status: {status}</div>"
+        f"<div>Container: {playground.get('name')}</div>"
+        f"<div>Image: {playground.get('image')}</div>"
+        f"{error_html}"
+        "</div>"
+    )
+
+
+def render_playground_log(state: Dict) -> str:
+    playground = state.get("playground", {})
+    if not playground.get("enabled"):
+        return "Playground disabled."
+    log_entries = playground.get("log", []) or []
+    if not log_entries:
+        return "No playground commands executed yet."
+    blocks = []
+    for entry in log_entries:
+        blocks.append(
+            "\n".join(
+                [
+                    f"$ {entry.get('cmd')}",
+                    f"Exit code: {entry.get('exit_code')}",
+                    "Stdout:",
+                    entry.get("stdout", ""),
+                    "Stderr:",
+                    entry.get("stderr", ""),
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
+
+
 def _default_prompt_source() -> str:
     return "<div class='prompt-source'><span class='label'>Prompt source:</span> typed</div>"
 
 
-def stream_runner(goal: str, scenario: str, fast: bool, use_dml: bool, dml_top_k: int):
+def stream_runner(
+    goal: str,
+    scenario: str,
+    fast: bool,
+    use_dml: bool,
+    dml_top_k: int,
+    use_playground: bool,
+    playground_image: str,
+    auto_remove_playground: bool,
+):
     if not ping_server():
         raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
 
-    for state in run_demo_stream(goal, fast=fast, scenario=scenario or None, use_dml=use_dml, dml_top_k=dml_top_k):
+    for state in run_demo_stream(
+        goal,
+        fast=fast,
+        scenario=scenario or None,
+        use_dml=use_dml,
+        dml_top_k=dml_top_k,
+        use_playground=use_playground,
+        playground_image=playground_image,
+        auto_remove_playground=auto_remove_playground,
+    ):
         metrics_html = render_metrics(state)
         timeline_html = render_progress(state["stages"]) + render_timeline(state)
         outputs = render_agent_outputs(state)
         final_text = state.get("final", "")
         cookbook_panel = render_cookbook_panel(state)
         ingest_panel = render_ingest_panel(state)
+        playground_status = render_playground_status(state)
+        playground_log = render_playground_log(state)
+        playground_name = state.get("playground", {}).get("name", "")
+        ready_for_removal = bool(state.get("playground", {}).get("ready_for_removal"))
+        status = str(state.get("playground", {}).get("status", "")).lower()
+        remove_btn_update = gr.update(visible=ready_for_removal, interactive=status not in {"removed", "missing"})
         yield (
             metrics_html,
             timeline_html,
@@ -189,6 +264,11 @@ def stream_runner(goal: str, scenario: str, fast: bool, use_dml: bool, dml_top_k
             final_text,
             cookbook_panel,
             ingest_panel,
+            playground_status,
+            playground_name,
+            playground_log,
+            remove_btn_update,
+            playground_name,
         )
 
 
@@ -213,8 +293,15 @@ def build_ui() -> gr.Blocks:
                 fast = gr.Checkbox(label="Fast mode (skip Ops, fewer tokens)")
                 use_dml = gr.Checkbox(label="DML Memory ON / OFF")
                 dml_top_k = gr.Slider(label="DML top_k", minimum=1, maximum=10, step=1, value=6, visible=False)
+                use_playground = gr.Checkbox(label="Use Playground Container", value=False)
+                playground_image = gr.Textbox(label="Playground image", value="nemotron-playground:latest", visible=False)
+                auto_remove_playground = gr.Checkbox(label="Auto-remove container after run", value=False, visible=False)
                 run_btn = gr.Button("Run Demo", variant="primary")
                 server_status = gr.HTML("", label="Server status")
+                playground_status = gr.HTML("", label="Playground status")
+                playground_name_display = gr.Textbox(label="Playground container", interactive=False)
+                remove_playground_btn = gr.Button("Remove Playground Container", variant="stop", visible=False)
+                remove_status = gr.Markdown(value="")
             with gr.Column(scale=2):
                 cookbook_panel = gr.HTML(elem_classes=["card"])
                 ingest_panel = gr.HTML(elem_classes=["card"])
@@ -233,6 +320,9 @@ def build_ui() -> gr.Blocks:
                     gr.Markdown("Cookbook guidance (beginning of run) and run report ingestion (end of run).")
                     dml_cookbook_tab = gr.HTML()
                     dml_ingest_tab = gr.HTML()
+                with gr.Tab("Playground"):
+                    gr.Markdown("Playground command execution log (truncated).")
+                    playground_log = gr.Textbox(label="Playground log", lines=12)
 
         with gr.Tab("Prompts"):
             with gr.Tab("Goal Presets"):
@@ -375,11 +465,42 @@ def build_ui() -> gr.Blocks:
             badge_html = _agent_badge(agent, content, default_value)
             return badge_html, diff_summary(agent, content)
 
+        playground_name_state = gr.State("")
+
         def update_status():
             status = ping_server()
             pill_class = "up" if status else "down"
             text = "Online" if status else "Offline"
             return f"<div class='server-pill {pill_class}'>● Server {text}</div>"
+
+        def toggle_playground(enabled: bool):
+            return gr.update(visible=enabled), gr.update(visible=enabled)
+
+        def remove_playground_container(name: str):
+            if not name:
+                return (
+                    "<div class='card'><h3>Playground</h3><div>No container available.</div></div>",
+                    "No playground container to remove.",
+                    gr.update(visible=True, interactive=False),
+                )
+            result = playground_manager.remove_playground(name)
+            status = playground_manager.status(name)
+            status_value = "removed" if result.get("ok") else status.get("status", "error")
+            state = {
+                "playground": {
+                    "enabled": True,
+                    "name": name,
+                    "status": status_value,
+                    "image": "",
+                    "error": result.get("error"),
+                }
+            }
+            message = "Playground container removed." if result.get("ok") else f"Remove failed: {result.get('error')}"
+            return (
+                render_playground_status(state),
+                message,
+                gr.update(visible=True, interactive=not result.get("ok")),
+            )
 
         demo.load(fn=update_status, inputs=None, outputs=server_status)
 
@@ -402,10 +523,11 @@ def build_ui() -> gr.Blocks:
         use_default_btn.click(fn=reset_to_default, inputs=agent_dropdown, outputs=[default_prompt, active_prompt, badge_holder, diff_text, agent_status])
 
         use_dml.change(fn=lambda enabled: gr.update(visible=enabled), inputs=use_dml, outputs=dml_top_k)
+        use_playground.change(fn=toggle_playground, inputs=use_playground, outputs=[playground_image, auto_remove_playground])
 
         run_btn.click(
             fn=stream_runner,
-            inputs=[goal, scenario, fast, use_dml, dml_top_k],
+            inputs=[goal, scenario, fast, use_dml, dml_top_k, use_playground, playground_image, auto_remove_playground],
             outputs=[
                 metrics_card,
                 timeline,
@@ -419,8 +541,19 @@ def build_ui() -> gr.Blocks:
                 final_box,
                 dml_cookbook_tab,
                 dml_ingest_tab,
+                playground_status,
+                playground_name_display,
+                playground_log,
+                remove_playground_btn,
+                playground_name_state,
             ],
             show_progress=True,
+        )
+
+        remove_playground_btn.click(
+            fn=remove_playground_container,
+            inputs=[playground_name_state],
+            outputs=[playground_status, remove_status, remove_playground_btn],
         )
 
     return demo

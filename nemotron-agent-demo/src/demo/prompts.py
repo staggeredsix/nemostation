@@ -30,6 +30,26 @@ DEFAULT_GOAL_PRESETS = [
     {"name": "Create a troubleshooting plan", "content": "Produce a stepwise troubleshooting plan with checkpoints and owners."},
     {"name": "Generate a demo script for a showroom", "content": "Draft a concise showroom demo script with beats and narration."},
     {"name": "Optimize vLLM flags for latency", "content": "Recommend vLLM flags that minimize latency for chat completions."},
+    {
+        "name": "Build an app end-to-end (long run)",
+        "content": (
+            "LONG_AGENT_RUN_MODE: true\n"
+            "Build a FastAPI + SQLite Incident Tracker end-to-end. This is a long-run session: aim for a 10–20 minute "
+            "walkthrough with detailed checkpoints and multi-file artifacts. Provide:\n"
+            "- Backend CRUD endpoints with models, schemas, and router layout.\n"
+            "- Minimal HTML UI (Jinja or static) to list/create incidents.\n"
+            "- Tests (pytest) for core CRUD flows.\n"
+            "- Dockerfile + docker-compose.yml.\n"
+            "- Makefile with setup, test, run, docker-build.\n"
+            "Checkpoints: (1) scaffold files, (2) implement backend endpoints, (3) implement UI, "
+            "(4) run tests, (5) docker build/run. If playground tools are enabled, emit JSON tool "
+            "requests like:\n"
+            "```json\n"
+            "{\"tool\":\"playground.exec\",\"cmd\":[\"bash\",\"-lc\",\"pytest -q\"],\"timeout_s\":120}\n"
+            "```\n"
+            "Use tool outputs to fix errors until tests pass and docker builds. End with a concise handoff summary.\n"
+        ),
+    },
 ]
 
 
@@ -191,4 +211,3 @@ def diff_summary(agent_name: str, active_content: str | None = None) -> str:
     active_lines = active.count("\n") + 1 if active else 0
     changed = "Yes" if active.strip() != default_content.strip() else "No"
     return f"Default lines: {default_lines} • Active lines: {active_lines} • Changed: {changed}"
-
