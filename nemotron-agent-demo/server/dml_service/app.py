@@ -188,6 +188,29 @@ def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int]:
     return summary.strip(), latency_ms
 
 
+def _fallback_cookbook(payload: RunReportRequest) -> str:
+    status = "success" if payload.success else "failure"
+    meta_json = json.dumps(payload.meta or {}, ensure_ascii=False, sort_keys=True)
+    return "\n".join(
+        [
+            f"TITLE: {payload.scenario_key}",
+            "WHAT WORKED:",
+            f"- Run status: {status}",
+            "WHAT FAILED:",
+            "- LLM cookbook summary was empty; fall back to basic run metadata.",
+            "DECISION HEURISTICS:",
+            f"- Goal: {payload.goal}",
+            "PITFALLS:",
+            "- Ensure DML summariser returns content; check model responses.",
+            "NEXT TIME TRY:",
+            "- Retry cookbook summarisation or inspect run trace for insights.",
+            "KEY ARTIFACTS / LINKS (if present):",
+            f"- RUN_ID: {payload.run_id}",
+            f"- META: {meta_json}",
+        ]
+    )
+
+
 app = FastAPI(title="DML Service", version="1.0")
 
 adapter = _build_adapter()
@@ -305,6 +328,9 @@ def ingest_run_report(request: RunReportRequest) -> RunReportResponse:
             meta=report_meta,
         )
         cookbook_text, summary_latency_ms = _summarize_cookbook(request)
+        if not cookbook_text.strip():
+            logger.warning("Cookbook summary empty for run_id=%s; using fallback.", request.run_id)
+            cookbook_text = _fallback_cookbook(request)
         cookbook_meta = {
             "scenario_key": request.scenario_key,
             "run_id": request.run_id,
