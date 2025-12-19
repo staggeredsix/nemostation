@@ -11,6 +11,7 @@ services:
       MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: ${HF_HOME:-/root/.cache/huggingface}
+      RMS_NORM_EPS: ${RMS_NORM_EPS:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     ipc: host

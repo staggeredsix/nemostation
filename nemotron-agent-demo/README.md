@@ -41,6 +41,10 @@ This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers v
 - `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
 - `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location (set `HF_TOKEN` for gated models)
 - The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-vllm:8000/v1`)
+- `RMS_NORM_EPS` to override the RMS norm epsilon passed to vLLM (defaults to the model config value or `1e-6`)
+
+### vLLM config compatibility patch
+The vLLM container currently ships with a config parser that expects `rms_norm_eps`, while the newest Nemotron configs include `rms_norm_epsilon`. The vLLM entrypoint now inspects `config.json` and forwards a compatible `rms_norm_eps` value via `--hf-overrides` to keep the server loading. This is intended as a temporary compatibility patch until the container and model configs line up again. If you need a different epsilon, export `RMS_NORM_EPS` before launching `docker compose`.
 
 ### Troubleshooting
 - **GPU access**: verify `nvidia-smi` works on the host and Docker can see GPUs.
