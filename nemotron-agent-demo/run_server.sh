@@ -5,13 +5,7 @@ MODEL_ID=${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
 PORT=${PORT:-8000}
 HOST=0.0.0.0
 
-python -m vllm.entrypoints.openai.api_server \
-  --host ${HOST} \
-  --port ${PORT} \
-  --model "${MODEL_ID}" \
-  --max-model-len 16384 \
-  --gpu-memory-utilization 0.90 \
-  "$@" &
+MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} python -m server.app "$@" &
 SERVER_PID=$!
 
 cleanup() {

@@ -1,0 +1,18 @@
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+WORKDIR /app
+
+RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir \
+      transformers==4.57.3 \
+      accelerate \
+      huggingface_hub \
+      fastapi \
+      "uvicorn[standard]" \
+      pydantic
+
+COPY server /app/server
+
+EXPOSE 8000
+
+CMD ["python", "-m", "server.app"]

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-docker logs -f nemotron-vllm
+docker logs -f nemotron-server
