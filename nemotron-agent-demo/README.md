@@ -1,10 +1,10 @@
-# Nemotron-3 Nano Agentic Demo (HF-only)
+# Nemotron-3 Nano Agentic Demo (NeMo container server)
 
 Brain-melty local demo that drives a single Nemotron-3 Nano model through planner/coder/reviewer/ops/aggregator roles and visualizes progress live.
 
 ## Features
 - Hugging Face weights only (default `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`).
-- vLLM OpenAI-compatible server at `http://localhost:8000/v1` with conservative defaults.
+- vLLM OpenAI-compatible server at `http://localhost:8000/v1` with the model-required reasoning parser.
 - Gradio UI with animated status badges, live metrics (approx TTFT, tokens/sec), and progressive timeline updates.
 - CLI demo that streams stage states in the terminal.
 - Offline-friendly after first model download.
@@ -24,13 +24,13 @@ Or directly:
 docker compose up --build
 ```
 This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
-- **vLLM server** (`nemotron-vllm`): nvcr.io/nvidia/vllm:25.11-py3, served at `http://localhost:8000/v1`
+- **NeMo container server** (`nemotron-vllm`): nvcr.io/nvidia/nemo:25.11.01 with vLLM >= 0.12.0 and the Nemotron-3 Nano reasoning parser plugin, served at `http://localhost:8000/v1`
 - **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
 
 ### Useful endpoints and volumes
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
-- On first run the vLLM container warms the model cache (full weights download) before reporting ready; this can take a while depending on your network and disk.
+- On first run the server container warms the model cache (full weights download + reasoning parser plugin) before reporting ready; this can take a while depending on your network and disk.
 - Tail the vLLM logs while it downloads: `docker logs -f nemotron-vllm`
 - Verify cached weights: `ls ./_hf_cache/hub`
 - HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
@@ -41,10 +41,10 @@ This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers v
 - `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
 - `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location (set `HF_TOKEN` for gated models)
 - The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-vllm:8000/v1`)
-- `RMS_NORM_EPS` to override the RMS norm epsilon passed to vLLM (defaults to the model config value or `1e-6`)
 
-### vLLM config compatibility patch
-The vLLM container currently ships with a config parser that expects `rms_norm_eps`, while the newest Nemotron configs include `rms_norm_epsilon`. The vLLM entrypoint now inspects `config.json` and forwards a compatible `rms_norm_eps` value via `--hf-overrides` to keep the server loading. This is intended as a temporary compatibility patch until the container and model configs line up again. If you need a different epsilon, export `RMS_NORM_EPS` before launching `docker compose`.
+### Model requirements
+- Nemotron-3 Nano requires vLLM >= 0.12.0 and a reasoning parser plugin. The container entrypoint installs the updated vLLM and downloads the plugin before launching the server.
+- Plan for a long first startup: the model weights and tokenizer files are downloaded into `./_hf_cache` and reused on subsequent runs.
 
 ### Troubleshooting
 - **GPU access**: verify `nvidia-smi` works on the host and Docker can see GPUs.

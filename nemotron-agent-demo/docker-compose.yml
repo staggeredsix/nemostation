@@ -1,8 +1,6 @@
-version: "3.9"
-
 services:
   nemotron-vllm:
-    image: nvcr.io/nvidia/vllm:25.11-py3
+    image: nvcr.io/nvidia/nemo:25.11.01
     container_name: nemotron-vllm
     restart: unless-stopped
     entrypoint: ["/bin/bash", "/scripts/vllm_entrypoint.sh"]
