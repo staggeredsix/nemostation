@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -70,6 +71,18 @@ def _build_adapter() -> DMLAdapter:
 app = FastAPI(title="DML Service", version="1.0")
 
 adapter = _build_adapter()
+
+
+@app.on_event("startup")
+def warmup_embedder() -> None:
+    start = time.perf_counter()
+    try:
+        adapter.embedder.embed("warmup")
+    except Exception:  # noqa: BLE001
+        logger.exception("DML warmup embed failed")
+        return
+    duration_ms = (time.perf_counter() - start) * 1000
+    logger.info("DML warmup embed completed in %.2f ms", duration_ms)
 
 
 @app.get("/health")
