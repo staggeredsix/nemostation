@@ -33,6 +33,10 @@ class StageState:
 DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
 LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
 MAX_TOOL_REQUESTS_PER_STAGE = 3
+FIXED_PLAYGROUND_COMMANDS = {
+    "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
+    "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
+}
 
 
 def _initial_state(goal: str, scenario: Optional[str], fast: bool) -> Dict:
@@ -108,6 +112,20 @@ def _format_tool_context(entry: Dict[str, Any]) -> str:
         f"Stdout:\n{entry.get('stdout')}\n"
         f"Stderr:\n{entry.get('stderr')}\n"
     )
+
+
+def _run_playground_command(
+    playground_name: str,
+    cmd: List[str],
+    playground_log: List[Dict[str, Any]],
+    tool_context_chunks: List[str],
+    timeout_s: int = 60,
+) -> Dict[str, Any]:
+    entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
+    entry["cmd"] = " ".join(cmd)
+    playground_log.append(entry)
+    tool_context_chunks.append(_format_tool_context(entry))
+    return entry
 
 
 def _update_stage(stages: List[StageState], name: str, **kwargs) -> None:
@@ -309,6 +327,15 @@ def run_demo_stream(
                     playground_log.append(entry)
                 if tool_entries:
                     stage_trace["tool_requests"] = tool_entries
+                fixed_command = FIXED_PLAYGROUND_COMMANDS.get(stage_name)
+                if fixed_command:
+                    fixed_entry = _run_playground_command(
+                        playground_name,
+                        fixed_command,
+                        playground_log,
+                        tool_context_chunks,
+                    )
+                    stage_trace["playground_commands"] = [fixed_entry]
             trace["stages"][stage_name] = stage_trace
             _update_stage(
                 stages,

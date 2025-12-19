@@ -220,6 +220,11 @@ def render_playground_status(state: Dict) -> str:
 
 
 def render_playground_log(state: Dict) -> str:
+    def _truncate(text: str, limit: int = 2000) -> str:
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}...\n[truncated]"
+
     playground = state.get("playground", {})
     if not playground.get("enabled"):
         return "Playground disabled."
@@ -234,9 +239,9 @@ def render_playground_log(state: Dict) -> str:
                     f"$ {entry.get('cmd')}",
                     f"Exit code: {entry.get('exit_code')}",
                     "Stdout:",
-                    entry.get("stdout", ""),
+                    _truncate(entry.get("stdout", "") or ""),
                     "Stderr:",
-                    entry.get("stderr", ""),
+                    _truncate(entry.get("stderr", "") or ""),
                 ]
             )
         )
