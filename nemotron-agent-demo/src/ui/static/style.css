@@ -47,6 +47,26 @@ body, .gradio-container {
   padding: 8px 10px;
   border-bottom: 1px solid #1b2433;
 }
+.dml-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 6px 0 10px;
+}
+.dml-pill.on {
+  background: #113927;
+  color: var(--success);
+}
+.dml-pill.off {
+  background: #2b3445;
+  color: var(--muted);
+}
 .timeline-row:last-child { border-bottom: none; }
 .timeline-name { font-weight: 700; }
 .progress-shell {
@@ -93,6 +113,41 @@ body, .gradio-container {
   padding: 10px;
   white-space: pre-wrap;
   font-family: "JetBrains Mono", monospace;
+}
+
+.memory-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.memory-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.memory-table th,
+.memory-table td {
+  border-bottom: 1px solid #1b2433;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.memory-table th {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.memory-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.memory-error {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 .prompt-source {

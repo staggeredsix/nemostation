@@ -19,7 +19,13 @@ class AgentResult:
     output: str
 
 
-def build_messages(role_prompt: str, goal: str, scenario: str | None = None, extra_context: str = "") -> List[Dict[str, str]]:
+def build_messages(
+    role_prompt: str,
+    goal: str,
+    scenario: str | None = None,
+    extra_context: str = "",
+    system_messages: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
     user_content = f"Goal: {goal}\nScenario: {scenario or 'general'}"
     if extra_context:
         user_content += f"\nContext:\n{extra_context}"
@@ -29,9 +35,13 @@ def build_messages(role_prompt: str, goal: str, scenario: str | None = None, ext
             "role": "system",
             "content": f"GB300 context:\n{get_context_payload()}",
         },
-        {"role": "system", "content": role_prompt},
-        {"role": "user", "content": user_content},
     ]
+    if system_messages:
+        for message in system_messages:
+            if message:
+                messages.append({"role": "system", "content": message})
+    messages.append({"role": "system", "content": role_prompt})
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
@@ -41,10 +51,11 @@ def call_agent(
     scenario: str | None = None,
     max_tokens: int = 512,
     extra_context: str = "",
+    system_messages: Optional[List[str]] = None,
 ) -> AgentResult:
     client = OpenAI(base_url=OPENAI_BASE_URL, api_key=API_KEY)
     prompt = get_active_prompt(role)
-    messages = build_messages(prompt, goal, scenario, extra_context)
+    messages = build_messages(prompt, goal, scenario, extra_context, system_messages=system_messages)
     response = client.chat.completions.create(
         model=MODEL_ID,
         messages=messages,

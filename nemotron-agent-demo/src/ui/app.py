@@ -46,7 +46,23 @@ def render_progress(stages: List[Dict]) -> str:
 
 
 def render_timeline(state: Dict) -> str:
+    dml_info = state.get("dml", {})
+    dml_enabled = bool(dml_info.get("enabled"))
+    dml_requested = bool(dml_info.get("requested"))
+    dml_top_k = dml_info.get("top_k", 0)
+    dml_error = dml_info.get("error")
+    if dml_requested and not dml_enabled and dml_error:
+        dml_label = f"DML: OFF ({dml_error})"
+        dml_class = "dml-pill off"
+    elif dml_enabled:
+        dml_label = f"DML: ON (k={dml_top_k})"
+        dml_class = "dml-pill on"
+    else:
+        dml_label = "DML: OFF"
+        dml_class = "dml-pill off"
+
     rows = []
+    rows.append(f"<div class='{dml_class}'>{dml_label}</div>")
     for stage in state.get("stages", []):
         rows.append(
             f"<div class='timeline-row'>"
@@ -82,19 +98,101 @@ def render_agent_outputs(state: Dict) -> Dict[str, str]:
     return outputs
 
 
+def _memory_key(entry: Dict) -> str:
+    meta = entry.get("meta") or {}
+    return str(meta.get("doc_path") or entry.get("id") or "unknown")
+
+
+def _memory_score(entry: Dict) -> str:
+    for key in ("fidelity", "score", "semantic_score"):
+        value = entry.get(key)
+        if value is not None:
+            try:
+                return f"{float(value):.3f}"
+            except (TypeError, ValueError):
+                return str(value)
+    return ""
+
+
+def _render_memory_table(entries: List[Dict], latency_ms: int, token_estimate: int, error: str | None) -> str:
+    if error:
+        return f"<div class='memory-error'>DML error: {error}</div>"
+    if not entries:
+        return "<div class='memory-empty'>No memories retrieved.</div>"
+    header = ""
+    if latency_ms or token_estimate:
+        header = (
+            "<div class='memory-meta'>"
+            f"Latency: {latency_ms} ms · Token estimate: {token_estimate}"
+            "</div>"
+        )
+    rows = []
+    for entry in entries:
+        meta = entry.get("meta") or {}
+        doc_path = meta.get("doc_path", "")
+        memory_id = entry.get("id", "")
+        summary = entry.get("summary", "")
+        score = _memory_score(entry)
+        rows.append(
+            "<tr>"
+            f"<td>{memory_id}</td>"
+            f"<td>{doc_path}</td>"
+            f"<td>{summary}</td>"
+            f"<td>{score}</td>"
+            "</tr>"
+        )
+    table = (
+        "<table class='memory-table'>"
+        "<thead><tr><th>Memory ID</th><th>Doc Path</th><th>Summary</th><th>Fidelity/Score</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+    return header + table
+
+
+def render_memory_access(state: Dict) -> Dict[str, str]:
+    per_stage = {}
+    all_entries: Dict[str, Dict] = {}
+    for stage in state.get("stages", []):
+        dml_info = stage.get("dml") or {}
+        entries = dml_info.get("entries", [])
+        for entry in entries:
+            key = _memory_key(entry)
+            if key not in all_entries:
+                all_entries[key] = entry
+        per_stage[stage["name"].lower()] = _render_memory_table(
+            entries,
+            int(dml_info.get("latency_ms", 0)),
+            int(dml_info.get("token_estimate", 0)),
+            dml_info.get("error"),
+        )
+
+    combined_entries = list(all_entries.values())
+    combined_table = _render_memory_table(combined_entries, 0, 0, None)
+    return {
+        "all": combined_table,
+        "planner": per_stage.get("planner", ""),
+        "coder": per_stage.get("coder", ""),
+        "reviewer": per_stage.get("reviewer", ""),
+        "ops": per_stage.get("ops", ""),
+        "aggregator": per_stage.get("aggregator", ""),
+    }
+
+
 def _default_prompt_source() -> str:
     return "<div class='prompt-source'><span class='label'>Prompt source:</span> typed</div>"
 
 
-def stream_runner(goal: str, scenario: str, fast: bool):
+def stream_runner(goal: str, scenario: str, fast: bool, use_dml: bool, dml_top_k: int):
     if not ping_server():
         raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
 
-    for state in run_demo_stream(goal, fast=fast, scenario=scenario or None):
+    for state in run_demo_stream(goal, fast=fast, scenario=scenario or None, use_dml=use_dml, dml_top_k=dml_top_k):
         metrics_html = render_metrics(state)
         timeline_html = render_progress(state["stages"]) + render_timeline(state)
         outputs = render_agent_outputs(state)
         final_text = state.get("final", "")
+        memory_panels = render_memory_access(state)
         yield (
             metrics_html,
             timeline_html,
@@ -104,6 +202,12 @@ def stream_runner(goal: str, scenario: str, fast: bool):
             outputs.get("ops", ""),
             outputs.get("aggregator", ""),
             final_text,
+            memory_panels["all"],
+            memory_panels["planner"],
+            memory_panels["coder"],
+            memory_panels["reviewer"],
+            memory_panels["ops"],
+            memory_panels["aggregator"],
         )
 
 
@@ -126,6 +230,8 @@ def build_ui() -> gr.Blocks:
                     value="Optimize inference for latency",
                 )
                 fast = gr.Checkbox(label="Fast mode (skip Ops, fewer tokens)")
+                use_dml = gr.Checkbox(label="DML Memory ON / OFF")
+                dml_top_k = gr.Slider(label="DML top_k", minimum=1, maximum=10, step=1, value=6, visible=False)
                 run_btn = gr.Button("Run Demo", variant="primary")
                 server_status = gr.HTML("", label="Server status")
             with gr.Column(scale=2):
@@ -140,6 +246,18 @@ def build_ui() -> gr.Blocks:
                     aggregator_box = gr.Textbox(label="Aggregator", lines=6)
                 with gr.Tab("Final Answer"):
                     final_box = gr.Textbox(label="Final", lines=8)
+                with gr.Tab("Memory Access"):
+                    memory_all = gr.HTML(label="All accessed memories")
+                    with gr.Accordion("Planner"):
+                        memory_planner = gr.HTML()
+                    with gr.Accordion("Coder"):
+                        memory_coder = gr.HTML()
+                    with gr.Accordion("Reviewer"):
+                        memory_reviewer = gr.HTML()
+                    with gr.Accordion("Ops"):
+                        memory_ops = gr.HTML()
+                    with gr.Accordion("Aggregator"):
+                        memory_aggregator = gr.HTML()
 
         with gr.Tab("Prompts"):
             with gr.Tab("Goal Presets"):
@@ -308,9 +426,11 @@ def build_ui() -> gr.Blocks:
         push_live_btn.click(fn=set_override, inputs=[agent_dropdown, active_prompt, gr.State(False), gr.State("Pushed override live")], outputs=[default_prompt, active_prompt, badge_holder, diff_text, agent_status])
         use_default_btn.click(fn=reset_to_default, inputs=agent_dropdown, outputs=[default_prompt, active_prompt, badge_holder, diff_text, agent_status])
 
+        use_dml.change(fn=lambda enabled: gr.update(visible=enabled), inputs=use_dml, outputs=dml_top_k)
+
         run_btn.click(
             fn=stream_runner,
-            inputs=[goal, scenario, fast],
+            inputs=[goal, scenario, fast, use_dml, dml_top_k],
             outputs=[
                 metrics_card,
                 timeline,
@@ -320,6 +440,12 @@ def build_ui() -> gr.Blocks:
                 ops_box,
                 aggregator_box,
                 final_box,
+                memory_all,
+                memory_planner,
+                memory_coder,
+                memory_reviewer,
+                memory_ops,
+                memory_aggregator,
             ],
             show_progress=True,
         )
