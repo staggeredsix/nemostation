@@ -6,10 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY nemotron-agent-demo/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY nemotron-agent-demo/ ./
+COPY vendors/daystrom_memory_lattice_alpha1 /app/nemostation/vendors/daystrom_memory_lattice_alpha1
 
 EXPOSE 7860
 
