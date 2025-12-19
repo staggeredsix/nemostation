@@ -28,6 +28,13 @@ This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers v
 - **Transformers server** (`nemotron-server`): nvcr.io/nvidia/pytorch:25.11-py3 with Transformers 4.57.x, served at `http://localhost:8000/v1`
 - **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
 
+### Rebuild the server image
+If the server base image or Python dependencies change, rebuild with no cache:
+```bash
+docker compose build --no-cache nemotron-server
+docker compose up
+```
+
 ### Useful endpoints and volumes
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
