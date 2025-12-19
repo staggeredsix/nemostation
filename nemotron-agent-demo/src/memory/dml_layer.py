@@ -2,18 +2,28 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-VENDOR_ROOT = Path(__file__).resolve().parents[3] / "vendors" / "daystrom_memeory_lattice_alpha1"
-if str(VENDOR_ROOT) not in sys.path:
-    sys.path.append(str(VENDOR_ROOT))
+DML_AVAILABLE = False
+DMLAdapter = None
 
-if find_spec("daystrom_dml.dml_adapter") is not None:
+
+def _add_vendor_path() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    vendor_path = repo_root / "vendors" / "daystrom_memeory_lattice_alpha1"
+    if vendor_path.exists() and str(vendor_path) not in sys.path:
+        sys.path.insert(0, str(vendor_path))
+
+
+_add_vendor_path()
+
+try:
     from daystrom_dml.dml_adapter import DMLAdapter
-else:
-    DMLAdapter = None  # type: ignore[assignment]
+
+    DML_AVAILABLE = True
+except Exception:
+    DML_AVAILABLE = False
 
 
 @dataclass
