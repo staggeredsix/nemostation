@@ -304,8 +304,8 @@ def build_ui() -> gr.Blocks:
             new_name_value = "" if clear_name else gr.update()
             return (
                 presets,
-                gr.Dropdown.update(choices=names, value=selected),
-                gr.Textbox.update(value=content),
+                gr.update(choices=names, value=selected),
+                gr.update(value=content),
                 "",
                 status,
                 new_name_value,
@@ -346,7 +346,7 @@ def build_ui() -> gr.Blocks:
 
         def push_goal(content: str, name: str):
             source = f"<div class='prompt-source'><span class='label'>Prompt source:</span> preset:{name}</div>" if name else _default_prompt_source()
-            return gr.Textbox.update(value=content), source
+            return gr.update(value=content), source
 
         def _agent_badge(agent: str, active: str, default: str) -> str:
             overridden = active.strip() != default.strip() or bool(get_saved_override(agent))
@@ -360,8 +360,8 @@ def build_ui() -> gr.Blocks:
             active_value = get_active_prompt(agent)
             badge_html = _agent_badge(agent, active_value, default_value)
             return (
-                gr.Textbox.update(value=default_value),
-                gr.Textbox.update(value=active_value),
+                gr.update(value=default_value),
+                gr.update(value=active_value),
                 badge_html,
                 diff_summary(agent, active_value),
                 "",
@@ -374,8 +374,8 @@ def build_ui() -> gr.Blocks:
             badge_html = _agent_badge(agent, content, default_value)
             status = f"{label} for **{agent}**." + (" (Session-only)" if not persist else "")
             return (
-                gr.Textbox.update(value=default_value),
-                gr.Textbox.update(value=content),
+                gr.update(value=default_value),
+                gr.update(value=content),
                 badge_html,
                 diff_summary(agent, content),
                 status,
@@ -387,8 +387,8 @@ def build_ui() -> gr.Blocks:
             default_value = defaults.get(agent, "")
             badge_html = _agent_badge(agent, default_value, default_value)
             return (
-                gr.Textbox.update(value=default_value),
-                gr.Textbox.update(value=default_value),
+                gr.update(value=default_value),
+                gr.update(value=default_value),
                 badge_html,
                 diff_summary(agent, default_value),
                 f"Reverted {agent} to default.",
