@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from typing import Dict, List
 
@@ -33,6 +34,25 @@ def ping_server() -> bool:
         return resp.status_code == 200
     except requests.RequestException:
         return False
+
+
+def docker_status_banner() -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except FileNotFoundError:
+        return "<div class='banner warning'>Docker CLI not installed in the UI container.</div>"
+    except subprocess.TimeoutExpired:
+        return "<div class='banner warning'>Docker CLI timed out while checking availability.</div>"
+
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip() or "Docker unavailable.")
+        return f"<div class='banner warning'>Docker unavailable: {detail}</div>"
+    return ""
 
 
 def badge(status: str) -> str:
@@ -276,6 +296,7 @@ def build_ui() -> gr.Blocks:
     css = CSS_PATH.read_text()
     with gr.Blocks(css=css, theme=gr.themes.Soft()) as demo:
         gr.Markdown("# Nemotron-3 Nano Agentic Demo — HF + Transformers")
+        docker_banner = gr.HTML()
         with gr.Row():
             with gr.Column(scale=1):
                 with gr.Row():
@@ -502,6 +523,7 @@ def build_ui() -> gr.Blocks:
                 gr.update(visible=True, interactive=not result.get("ok")),
             )
 
+        demo.load(fn=docker_status_banner, inputs=None, outputs=docker_banner)
         demo.load(fn=update_status, inputs=None, outputs=server_status)
 
         demo.load(fn=load_presets, inputs=None, outputs=[presets_state, preset_dropdown, preset_content, unsaved_indicator, preset_status, new_name])
