@@ -12,6 +12,8 @@ WORKSPACE_ROOT = BASE_DIR / "playground_workspace"
 DOCKER_ALLOWED_COMMANDS = {"inspect", "start", "run", "exec", "rm"}
 DOCKER_BLOCKED_COMMANDS = {"prune", "rmi"}
 DOCKER_BLOCKED_SUBCOMMANDS = {("system", "prune"), ("volume", "rm"), ("network", "rm"), ("image", "rm")}
+FALLBACK_PLAYGROUND_IMAGE = "python:3.11-slim"
+MISSING_IMAGE_HINTS = ("No such image", "No such object", "not found")
 
 
 def _run_docker(args: List[str], timeout_s: int = 30) -> subprocess.CompletedProcess | None:
@@ -53,6 +55,21 @@ def _validate_container_name(name: str) -> str | None:
     if not allowed:
         return reason or "Container name rejected."
     return None
+
+
+def _resolve_playground_image(image: str) -> tuple[str, Optional[str]]:
+    result = _run_docker(["inspect", "--type=image", image])
+    if result is None:
+        return image, None
+    if result.returncode == 0:
+        return image, None
+    detail = (result.stderr or result.stdout).strip()
+    if any(hint in detail for hint in MISSING_IMAGE_HINTS):
+        return (
+            FALLBACK_PLAYGROUND_IMAGE,
+            f"Playground image {image} not found locally. Falling back to {FALLBACK_PLAYGROUND_IMAGE}.",
+        )
+    return image, None
 
 
 def status(name: str) -> Dict:
@@ -103,6 +120,7 @@ def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -
     if repo_mount:
         volume_args += ["-v", f"{Path(repo_mount).resolve()}:/workspace/app"]
 
+    resolved_image, warning = _resolve_playground_image(image)
     result = _run_docker(
         [
             "run",
@@ -120,7 +138,7 @@ def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -
             "--user",
             policy.PLAYGROUND_USER,
             *volume_args,
-            image,
+            resolved_image,
             "sleep",
             "infinity",
         ]
@@ -140,9 +158,18 @@ def ensure_playground(image: str, name: str, repo_mount: Optional[str] = None) -
             "running": False,
             "status": "error",
             "error": _docker_error(result, "failed to start playground"),
+            "warning": warning,
+            "requested_image": image,
         }
     current = status(name)
-    current.update({"image": image, "workspace": str(workspace_host)})
+    current.update(
+        {
+            "image": resolved_image,
+            "workspace": str(workspace_host),
+            "warning": warning,
+            "requested_image": image,
+        }
+    )
     return current
 
 

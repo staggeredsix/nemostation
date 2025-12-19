@@ -198,13 +198,22 @@ def render_playground_status(state: Dict) -> str:
     else:
         badge_status = "queued"
     error = playground.get("error")
+    warning = playground.get("warning")
+    image = playground.get("image")
+    requested_image = playground.get("requested_image")
+    warning_html = f"<div class='banner warning'>{warning}</div>" if warning else ""
     error_html = f"<div class='memory-error'>Error: {error}</div>" if error else ""
+    requested_html = ""
+    if requested_image and requested_image != image:
+        requested_html = f"<div>Requested image: {requested_image}</div>"
     return (
         "<div class='card'>"
         "<h3>Playground</h3>"
+        f"{warning_html}"
         f"<div>{badge(badge_status)} Status: {status}</div>"
         f"<div>Container: {playground.get('name')}</div>"
-        f"<div>Image: {playground.get('image')}</div>"
+        f"<div>Image: {image}</div>"
+        f"{requested_html}"
         f"{error_html}"
         "</div>"
     )

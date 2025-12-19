@@ -48,6 +48,12 @@ docker compose up -d --force-recreate nemotron-ui
 docker exec nemotron-ui docker ps
 ```
 
+### Build the playground image
+The playground container image is a local-only dev image used by the UI when running command tools. Build it once:
+```bash
+docker compose --profile playground build nemotron-playground-image
+```
+
 ### Useful endpoints and volumes
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
