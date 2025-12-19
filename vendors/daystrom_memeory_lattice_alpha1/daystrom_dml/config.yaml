@@ -1,0 +1,40 @@
+beta_a: 0.08
+beta_r: 0.2
+eta: 0.15
+gamma: 0.02
+kappa: 0.5
+tau_s: 0.1
+theta_merge: 0.92
+K: 4
+capacity: 2000
+top_k: 6
+dml_top_k: 8
+similarity_threshold: 0.32
+token_budget: 600
+model_name: mistralai/Mistral-7B-Instruct-v0.2
+embedding_model: sentence-transformers/all-MiniLM-L6-v2
+embedding_device: null
+storage_dir: data
+checkpoint_interval_seconds: 0
+checkpoint_retention: 5
+vector_index_file: vector_index.json
+metrics_enabled: true
+enable_quality_on_retrieval: false
+enable_workflow_cache: false
+literal:
+  max_snippet_tokens: 160
+  max_snippets: 8
+budgets:
+  semantic_pct: 0.7
+  literal_pct: 0.2
+  free_pct: 0.1
+persistence:
+  enable: true
+  path: ./data/dml_state.jsonl
+  interval_sec: 300
+rag_store:
+  enable: true
+  path: ./data/rag_index.faiss
+  meta_path: ./data/rag_meta.json
+  backend: faiss
+  dim: 384

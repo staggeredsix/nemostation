@@ -1,0 +1,10 @@
+line-length = 120
+src = ["daystrom_dml", "bench", "mcp", "scripts", "tests", "app"]
+target-version = "py310"
+
+[lint]
+select = ["E", "F"]
+ignore = ["E203", "E266", "E501"]
+
+[lint.isort]
+known-first-party = ["daystrom_dml", "mcp"]

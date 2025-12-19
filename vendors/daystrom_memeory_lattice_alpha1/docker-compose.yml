@@ -1,0 +1,47 @@
+services:
+  dml-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.dml
+    container_name: dml-service
+    runtime: nvidia
+    environment:
+      DML_PERSISTENCE_ENABLE: "1"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  nim-llm:
+    build:
+      context: .
+      dockerfile: Dockerfile.dml
+    command: ["python", "-m", "app.nim_demo"]
+    environment:
+      DML_SERVICE_URL: "http://dml-service:8000"
+    depends_on:
+      - dml-service
+
+  ace-agent-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile.dml
+    command: ["python", "-m", "app.ace_agent_demo"]
+    environment:
+      DML_SERVICE_URL: "http://dml-service:8000"
+    depends_on:
+      - dml-service
+
+  isaac-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile.dml
+    command: ["python", "-m", "app.isaac_demo"]
+    environment:
+      DML_SERVICE_URL: "http://dml-service:8000"
+    depends_on:
+      - dml-service
