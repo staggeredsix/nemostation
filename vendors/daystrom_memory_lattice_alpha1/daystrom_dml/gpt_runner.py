@@ -32,6 +32,23 @@ class GPTRunner:
     def __post_init__(self) -> None:
         self._backend = None
         self._last_usage: Optional[dict] = None
+        backend_choice = (os.getenv("DML_LLM_BACKEND") or "").strip().lower()
+        if backend_choice == "openai":
+            base_url = os.getenv("DML_OPENAI_BASE_URL", "").strip()
+            model_name = os.getenv("DML_OPENAI_MODEL") or self.model_name
+            api_key = _normalise_api_key(os.getenv("DML_OPENAI_API_KEY"))
+            self._backend = _OpenAIClientBackend(
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+            )
+            LOGGER.info(
+                "DML summarizer backend: openai -> %s model=%s enable_thinking=%s",
+                base_url,
+                model_name,
+                _read_summary_enable_thinking(),
+            )
+            return
         remote_base = os.getenv("DML_API_BASE") or os.getenv("OPENAI_API_BASE")
         remote_base = remote_base or os.getenv("NIM_API_BASE")
         remote_key = os.getenv("DML_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -83,6 +100,10 @@ class GPTRunner:
         LOGGER.debug("Prompt excerpt: %s", prompt[:400])
         if isinstance(self._backend, _DummyBackend):
             return self._backend.generate(prompt, max_new_tokens=max_new_tokens)
+        if isinstance(self._backend, _OpenAIClientBackend):
+            text, usage = self._backend.generate(prompt, max_new_tokens=max_new_tokens)
+            self._last_usage = usage
+            return text
         if isinstance(self._backend, _OpenAICompatibleBackend):
             text, usage = self._backend.generate(prompt, max_new_tokens=max_new_tokens)
             self._last_usage = usage
@@ -95,6 +116,27 @@ class GPTRunner:
     def summarize(self, text: str, max_len: int = 128) -> str:
         if isinstance(self._backend, _DummyBackend):
             return self._backend.summarize(text, max_len=max_len)
+        if isinstance(self._backend, _OpenAIClientBackend):
+            summary_tokens = _read_summary_max_tokens(default=max_len)
+            temperature = _read_summary_temperature()
+            top_p = _read_summary_top_p()
+            enable_thinking = _read_summary_enable_thinking()
+            extra_body = None
+            if not enable_thinking:
+                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+            text, usage = self._backend.generate(
+                (
+                    "Summarise the following content in at most "
+                    f"{max_len} characters.\n{text}"
+                ),
+                max_new_tokens=summary_tokens,
+                system_prompt="You are a precise summariser that responds with plain text.",
+                temperature=temperature,
+                top_p=top_p,
+                extra_body=extra_body,
+            )
+            self._last_usage = usage
+            return text.strip()
         if isinstance(self._backend, _OpenAICompatibleBackend):
             text, usage = self._backend.generate(
                 (
@@ -156,6 +198,52 @@ class _DummyBackend:
         return text[: max_len - 3] + "..."
 
 
+class _OpenAIClientBackend:
+    """OpenAI SDK-backed client for OpenAI-compatible servers."""
+
+    def __init__(self, *, base_url: str, api_key: Optional[str], model_name: str) -> None:
+        from openai import OpenAI
+
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model_name = model_name
+        self._client = OpenAI(base_url=self.base_url, api_key=api_key or "EMPTY")
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int = 256,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.2,
+        top_p: float = 0.95,
+        extra_body: Optional[dict] = None,
+    ) -> tuple[str, Optional[dict]]:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if extra_body is not None:
+            payload["extra_body"] = extra_body
+        LOGGER.info(
+            "Dispatching completion request to OpenAI-compatible endpoint %s using model %s",
+            self.base_url,
+            self.model_name,
+        )
+        response = self._client.chat.completions.create(**payload)
+        message = response.choices[0].message if response.choices else None
+        content = message.content if message else ""
+        usage = response.usage.model_dump() if response.usage else None
+        return (content or "").strip(), usage
+
+
 class _OpenAICompatibleBackend:
     """Thin wrapper around OpenAI-compatible REST endpoints (incl. NVIDIA NIM)."""
 
@@ -208,3 +296,52 @@ class _OpenAICompatibleBackend:
             content = str(content)
         LOGGER.info("Received response from NIM endpoint %s", url)
         return content.strip(), data.get("usage")
+
+
+def _read_summary_max_tokens(*, default: int) -> int:
+    raw = os.getenv("DML_SUMMARY_MAX_TOKENS")
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _read_summary_temperature() -> float:
+    raw = os.getenv("DML_SUMMARY_TEMPERATURE")
+    if not raw:
+        return 0.2
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.2
+
+
+def _read_summary_top_p() -> float:
+    raw = os.getenv("DML_SUMMARY_TOP_P")
+    if not raw:
+        return 0.95
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.95
+
+
+def _read_summary_enable_thinking() -> bool:
+    raw = os.getenv("DML_SUMMARY_ENABLE_THINKING")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalise_api_key(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    if cleaned.lower() in {"none", "null"}:
+        return None
+    return cleaned
