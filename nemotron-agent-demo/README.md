@@ -4,7 +4,7 @@ Brain-melty local demo that drives a single Nemotron-3 Nano model through planne
 
 ## Features
 - Hugging Face weights only (default `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`).
-- Transformers-based OpenAI-compatible server at `http://localhost:8000/v1`.
+- TensorRT-LLM AutoDeploy server at `http://localhost:8000/v1`.
 - Gradio UI with animated status badges, live metrics (approx TTFT, tokens/sec), and progressive timeline updates.
 - CLI demo that streams stage states in the terminal.
 - Optional Daystrom Memory Lattice (DML) layer for persistent memory + transparent retrievals.
@@ -25,14 +25,25 @@ Or directly:
 docker compose up --build
 ```
 This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
-- **Transformers server** (`nemotron-server`): nvcr.io/nvidia/nemo:25.11.01 with Transformers 4.57.x, served at `http://localhost:8000/v1`
+- **TRT-LLM server** (`nemotron-trtllm`): nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5, served at `http://localhost:8000/v1`
 - **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
   - Note: the server image must include CUDA + Python 3.11 so `mamba-ssm` installs from wheels.
 
-### Rebuild the server image
-If the server base image or Python dependencies change, rebuild with no cache:
+### TRT-LLM Server (AutoDeploy)
 ```bash
-docker compose build --no-cache nemotron-server
+docker compose up --build
+```
+```bash
+curl http://localhost:8000/v1/models
+```
+UI: `http://localhost:7860`
+
+On first run, TensorRT-LLM may compile/build artifacts and download weights. Subsequent runs reuse `./_trtllm_cache` and `./_hf_cache` for faster startup.
+
+### Rebuild the server image
+If the UI image changes, rebuild with no cache:
+```bash
+docker compose build --no-cache nemotron-ui
 docker compose up
 ```
 
@@ -40,7 +51,7 @@ docker compose up
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
 - On first run the server container warms the model cache (full weights download) before reporting ready; this can take a while depending on your network and disk.
-- Tail the server logs while it downloads: `docker logs -f nemotron-server`
+- Tail the server logs while it downloads: `docker logs -f nemotron-trtllm`
 - Verify cached weights: `ls ./_hf_cache/hub`
 - HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
 - Prompt edits persist in `./prompt_library` (mounted to `/app/prompt_library`)
@@ -49,10 +60,10 @@ docker compose up
 ### Environment overrides
 - `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
 - `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location (set `HF_TOKEN` for gated models)
-- The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-server:8000/v1`)
+- The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-trtllm:8000/v1`)
 
 ### Model requirements
-- Nemotron-3 Nano runs via Transformers (4.57.3+) with `trust_remote_code=True`.
+- Nemotron-3 Nano runs via TensorRT-LLM AutoDeploy with `trust_remote_code=True`.
 - Plan for a long first startup: the model weights and tokenizer files are downloaded into `./_hf_cache` and reused on subsequent runs.
 - Toggle reasoning via `chat_template_kwargs.enable_thinking` (or `extra_body.chat_template_kwargs.enable_thinking`) in `/v1/chat/completions` requests.
 

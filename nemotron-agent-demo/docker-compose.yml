@@ -1,29 +1,28 @@
 services:
-  nemotron-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
-    container_name: nemotron-server
-    restart: unless-stopped
+  nemotron-trtllm:
+    image: nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5
+    container_name: nemotron-trtllm
+    ports:
+      - "8000:8000"
     gpus: all
-    environment:
-      MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
-      HF_TOKEN: ${HF_TOKEN:-}
-      OPENAI_MODEL_NAME: ${OPENAI_MODEL_NAME:-}
     ipc: host
     shm_size: "8gb"
     ulimits:
       memlock: -1
       stack: 67108864
+    environment:
+      MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
+      HF_TOKEN: ${HF_TOKEN:-}
+      TRTLLM_ENABLE_PDL: 1
     volumes:
       - ./_hf_cache:/root/.cache/huggingface
-      - ./server:/app/server
-    ports:
-      - "8000:8000"
+      - ./_trtllm_cache:/trtllm_cache
+      - ./server/trtllm:/app/trtllm
+    entrypoint: ["/bin/bash", "/app/trtllm/entrypoint.sh"]
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/v1/models"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null || exit 1"]
       interval: 10s
-      timeout: 10s
+      timeout: 5s
       retries: 300
       start_period: 30m
 
@@ -34,7 +33,7 @@ services:
     container_name: nemotron-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://nemotron-server:8000/v1
+      OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
     ports:
@@ -44,5 +43,5 @@ services:
       - ./context:/app/context:ro
       - ./prompts:/app/prompts:ro
     depends_on:
-      nemotron-server:
+      nemotron-trtllm:
         condition: service_healthy
