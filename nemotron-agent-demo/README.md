@@ -7,6 +7,7 @@ Brain-melty local demo that drives a single Nemotron-3 Nano model through planne
 - Transformers-based OpenAI-compatible server at `http://localhost:8000/v1`.
 - Gradio UI with animated status badges, live metrics (approx TTFT, tokens/sec), and progressive timeline updates.
 - CLI demo that streams stage states in the terminal.
+- Optional Daystrom Memory Lattice (DML) layer for persistent memory + transparent retrievals.
 - Offline-friendly after first model download.
 
 ## Containerized quickstart (recommended)
@@ -74,6 +75,19 @@ Container-first is preferred; local runs still expect a GPU and will download we
   - Choose an agent (system/planner/coder/reviewer/ops/aggregator) to view the default prompt alongside the active prompt.
   - Click **Save Override** to persist an edited prompt to `prompt_library/agent_overrides/<agent>.txt`, or **Push Override Live** for a session-only override.
   - **Use Default** clears the override file and flips the badge back to DEFAULT. A diff summary shows when an override diverges from the default template.
+
+## Daystrom Memory Lattice (DML)
+The DML layer adds **persistent memory** across runs and a **transparent retrieval report** per stage so you can see exactly which memories were used.
+
+### Enable/disable
+- In the UI, toggle **DML Memory ON / OFF**.
+- When enabled, adjust **DML top_k** to control how many memories are retrieved per stage.
+
+### Storage location
+- DML data is stored in `./data/dml` (persisted across runs).
+
+### Reset memory
+- Stop the UI, then delete the directory: `rm -rf ./data/dml`
 
 ## Run the CLI demo
 ```bash
