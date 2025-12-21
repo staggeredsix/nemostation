@@ -50,6 +50,27 @@ DEFAULT_GOAL_PRESETS = [
             "Use tool outputs to fix errors until tests pass and docker builds. End with a concise handoff summary.\n"
         ),
     },
+    {
+        "name": "Build & Validate a Mini Service Cluster",
+        "content": (
+            "LONG_AGENT_RUN_MODE: true\n"
+            "Build & validate a mini service cluster inside /workspace. Generate:\n"
+            "1) /workspace/api_service (FastAPI) with endpoints:\n"
+            "   - GET /health\n"
+            "   - POST /job {input} -> enqueue Redis, return job_id\n"
+            "   - GET /job/{id} -> status/result\n"
+            "2) /workspace/worker_service (Python worker) consuming Redis queue and writing results.\n"
+            "3) /workspace/webui (cheap Gradio UI) that submits jobs and polls results.\n"
+            "Use Redis for queue + status. Use env vars REDIS_URL and API_URL.\n"
+            "If cluster tools are enabled, use JSON tool requests for:\n"
+            "```json\n"
+            "{\"tool\":\"cluster.exec\",\"container\":\"nemotron-play-<runid>-api\",\"cmd\":[\"bash\",\"-lc\",\"python -m api_service.main\"],\"timeout_s\":60}\n"
+            "```\n"
+            "Also run `cluster.validate` after starting services. Verify end-to-end:\n"
+            "web -> api -> redis -> worker -> api -> web. Fix failures and rerun validation.\n"
+            "At the end, print host URLs for API + Web, the exact validation commands, and any fixes applied.\n"
+        ),
+    },
 ]
 
 
