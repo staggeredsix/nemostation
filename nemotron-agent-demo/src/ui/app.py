@@ -9,6 +9,7 @@ import gradio as gr
 import requests
 
 from src.demo.orchestrator import run_demo_stream
+from src.playground import cluster_manager
 from src.playground import manager as playground_manager
 from src.demo.prompts import (
     clear_override,
@@ -230,6 +231,65 @@ def render_playground_status(state: Dict) -> str:
     )
 
 
+def render_cluster_status(state: Dict) -> str:
+    cluster = state.get("cluster", {})
+    if not cluster.get("enabled"):
+        return "<div class='card'><h3>Cluster</h3><div>Cluster disabled.</div></div>"
+    status = str(cluster.get("status") or "unknown").lower()
+    if status == "running":
+        badge_status = "running"
+    elif status in {"removed", "exited"}:
+        badge_status = "done"
+    elif status in {"error", "missing"}:
+        badge_status = "failed"
+    else:
+        badge_status = "queued"
+    error = cluster.get("error")
+    error_html = f"<div class='memory-error'>Error: {error}</div>" if error else ""
+    containers = cluster.get("containers", []) or []
+    container_html = ", ".join([c.get("name", "") for c in containers]) if containers else "—"
+    api_port = cluster.get("api_port")
+    web_port = cluster.get("web_port")
+    api_url = f"http://localhost:{api_port}" if api_port else "—"
+    web_url = f"http://localhost:{web_port}" if web_port else "—"
+    workspace_host = cluster.get("workspace_host")
+    workspace_container = cluster.get("workspace_container")
+    workspace_html = ""
+    if workspace_host or workspace_container:
+        workspace_html = (
+            "<div class='workspace-paths'>"
+            f"<div>Host workspace: {workspace_host or '—'}</div>"
+            f"<div>Container workspace: {workspace_container or '—'}</div>"
+            "</div>"
+        )
+    return (
+        "<div class='card'>"
+        "<h3>Cluster</h3>"
+        f"<div>{badge(badge_status)} Status: {status}</div>"
+        f"<div>Network: {cluster.get('network') or '—'}</div>"
+        f"<div>Containers: {container_html}</div>"
+        f"<div>API URL: {api_url}</div>"
+        f"<div>Web URL: {web_url}</div>"
+        f"{workspace_html}"
+        f"{error_html}"
+        "</div>"
+    )
+
+
+def render_cluster_validation(state: Dict) -> str:
+    cluster = state.get("cluster", {})
+    validation = cluster.get("validation", {})
+    if not validation:
+        return "No validation run yet."
+    checks = validation.get("checks", [])
+    lines = [f"Overall: {'PASS' if validation.get('ok') else 'FAIL'}"]
+    for check in checks:
+        status = "PASS" if check.get("ok") else "FAIL"
+        detail = check.get("detail", "")
+        lines.append(f"- {check.get('name')}: {status} {detail}")
+    return "\n".join(lines)
+
+
 def render_playground_log(state: Dict) -> str:
     def _truncate(text: str, limit: int = 2000) -> str:
         if len(text) <= limit:
@@ -272,6 +332,9 @@ def stream_runner(
     use_playground: bool,
     playground_image: str,
     auto_remove_playground: bool,
+    use_cluster: bool,
+    cluster_image: str,
+    cluster_size: int,
 ):
     if not ping_server():
         raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
@@ -285,6 +348,9 @@ def stream_runner(
         use_playground=use_playground,
         playground_image=playground_image,
         auto_remove_playground=auto_remove_playground,
+        use_cluster=use_cluster,
+        cluster_image=cluster_image,
+        cluster_size=cluster_size,
     ):
         metrics_html = render_metrics(state)
         timeline_html = render_progress(state["stages"]) + render_timeline(state)
@@ -294,13 +360,22 @@ def stream_runner(
         ingest_panel = render_ingest_panel(state)
         playground_status = render_playground_status(state)
         playground_log = render_playground_log(state)
+        cluster_status = render_cluster_status(state)
+        cluster_validation = render_cluster_validation(state)
         playground_name = state.get("playground", {}).get("name", "")
         playground_workspace_host = state.get("playground", {}).get("workspace_host", "")
         playground_workspace_container = state.get("playground", {}).get("workspace_container", "")
+        cluster_run_id = state.get("cluster", {}).get("run_id", "")
+        cluster_workspace_host = state.get("cluster", {}).get("workspace_host", "")
+        cluster_workspace_container = state.get("cluster", {}).get("workspace_container", "")
         ready_for_removal = bool(state.get("playground", {}).get("ready_for_removal"))
         status = str(state.get("playground", {}).get("status", "")).lower()
         remove_btn_update = gr.update(visible=ready_for_removal, interactive=status not in {"removed", "missing"})
         delete_btn_update = gr.update(visible=ready_for_removal and bool(playground_workspace_host))
+        cluster_ready = bool(state.get("cluster", {}).get("ready_for_removal"))
+        cluster_status_value = str(state.get("cluster", {}).get("status", "")).lower()
+        destroy_btn_update = gr.update(visible=cluster_ready, interactive=cluster_status_value not in {"removed", "missing"})
+        delete_cluster_btn_update = gr.update(visible=cluster_ready and bool(cluster_workspace_host))
         yield (
             metrics_html,
             timeline_html,
@@ -322,6 +397,14 @@ def stream_runner(
             remove_btn_update,
             delete_btn_update,
             playground_name,
+            cluster_status,
+            cluster_run_id,
+            cluster_workspace_host,
+            cluster_workspace_container,
+            cluster_validation,
+            destroy_btn_update,
+            delete_cluster_btn_update,
+            cluster_run_id,
         )
 
 
@@ -350,14 +433,24 @@ def build_ui() -> gr.Blocks:
                 use_playground = gr.Checkbox(label="Use Playground Container", value=False)
                 playground_image = gr.Textbox(label="Playground image", value="nemotron-playground:latest", visible=False)
                 auto_remove_playground = gr.Checkbox(label="Auto-remove container after run", value=False, visible=False)
+                use_cluster = gr.Checkbox(label="Use Cluster Playground", value=False)
+                cluster_size = gr.Slider(label="Cluster size", minimum=3, maximum=5, step=1, value=4, visible=False)
+                cluster_image = gr.Textbox(label="Cluster image", value="nemotron-playground:latest", visible=False)
+                create_cluster_btn = gr.Button("Create Cluster", visible=False)
+                validate_cluster_btn = gr.Button("Run Validation", visible=False)
+                destroy_cluster_btn = gr.Button("Destroy Cluster", variant="stop", visible=False)
                 run_btn = gr.Button("Run Demo", variant="primary")
                 server_status = gr.HTML("", label="Server status")
                 playground_status = gr.HTML("", label="Playground status")
+                cluster_status = gr.HTML("", label="Cluster status")
                 playground_name_display = gr.Textbox(label="Playground container", interactive=False)
+                cluster_run_id_display = gr.Textbox(label="Cluster run ID", interactive=False)
                 remove_playground_btn = gr.Button("Remove Playground Container", variant="stop", visible=False)
                 delete_workspace_btn = gr.Button("Delete Workspace", variant="stop", visible=False)
+                delete_cluster_workspace_btn = gr.Button("Delete Cluster Workspace", variant="stop", visible=False)
                 remove_status = gr.Markdown(value="")
                 delete_status = gr.Markdown(value="")
+                delete_cluster_status = gr.Markdown(value="")
             with gr.Column(scale=2):
                 cookbook_panel = gr.HTML(elem_classes=["card"])
                 ingest_panel = gr.HTML(elem_classes=["card"])
@@ -382,6 +475,12 @@ def build_ui() -> gr.Blocks:
                         playground_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
                     gr.Markdown("Playground command execution log (truncated).")
                     playground_log = gr.Textbox(label="Playground log", lines=12)
+                with gr.Tab("Cluster"):
+                    with gr.Row():
+                        cluster_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
+                        cluster_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
+                    gr.Markdown("Cluster validation report.")
+                    cluster_validation = gr.Textbox(label="Cluster validation", lines=10)
 
         with gr.Tab("Prompts"):
             with gr.Tab("Goal Presets"):
@@ -525,6 +624,7 @@ def build_ui() -> gr.Blocks:
             return badge_html, diff_summary(agent, content)
 
         playground_name_state = gr.State("")
+        cluster_run_id_state = gr.State("")
 
         def update_status():
             status = ping_server()
@@ -534,6 +634,15 @@ def build_ui() -> gr.Blocks:
 
         def toggle_playground(enabled: bool):
             return gr.update(visible=enabled), gr.update(visible=enabled)
+
+        def toggle_cluster(enabled: bool):
+            return (
+                gr.update(visible=enabled),
+                gr.update(visible=enabled),
+                gr.update(visible=enabled),
+                gr.update(visible=enabled),
+                gr.update(visible=enabled),
+            )
 
         def remove_playground_container(name: str):
             if not name:
@@ -568,6 +677,45 @@ def build_ui() -> gr.Blocks:
             message = "Workspace deleted." if result.get("ok") else f"Workspace delete failed: {result.get('error')}"
             return message, gr.update(visible=True, interactive=not result.get("ok"))
 
+        def create_cluster(size: int, image: str):
+            run_id = os.urandom(8).hex()
+            cluster_state = cluster_manager.create_cluster(run_id, image, size, workspace_host=None)
+            state = {"cluster": {"enabled": True, "run_id": run_id, **cluster_state}}
+            status_html = render_cluster_status(state)
+            validation_text = render_cluster_validation(state)
+            destroy_update = gr.update(visible=True, interactive=cluster_state.get("ok", False))
+            delete_update = gr.update(visible=bool(cluster_state.get("workspace_host")))
+            return (
+                status_html,
+                run_id,
+                cluster_state.get("workspace_host", ""),
+                cluster_state.get("workspace_container", ""),
+                validation_text,
+                destroy_update,
+                delete_update,
+                run_id,
+            )
+
+        def validate_cluster(run_id: str):
+            if not run_id:
+                return "No cluster run ID available."
+            validation = cluster_manager.validate_cluster(run_id)
+            state = {"cluster": {"enabled": True, "run_id": run_id, "validation": validation}}
+            return render_cluster_validation(state)
+
+        def destroy_cluster(run_id: str):
+            if not run_id:
+                return (
+                    "<div class='card'><h3>Cluster</h3><div>No cluster available.</div></div>",
+                    "No cluster run ID available.",
+                    gr.update(visible=True, interactive=False),
+                )
+            result = cluster_manager.destroy_cluster(run_id)
+            status = "removed" if result.get("ok") else "error"
+            state = {"cluster": {"enabled": True, "run_id": run_id, "status": status, "error": result.get("error")}}
+            message = "Cluster destroyed." if result.get("ok") else f"Destroy failed: {result.get('error')}"
+            return render_cluster_status(state), message, gr.update(visible=True, interactive=not result.get("ok"))
+
         demo.load(fn=docker_status_banner, inputs=None, outputs=docker_banner)
         demo.load(fn=update_status, inputs=None, outputs=server_status)
 
@@ -591,10 +739,27 @@ def build_ui() -> gr.Blocks:
 
         use_dml.change(fn=lambda enabled: gr.update(visible=enabled), inputs=use_dml, outputs=dml_top_k)
         use_playground.change(fn=toggle_playground, inputs=use_playground, outputs=[playground_image, auto_remove_playground])
+        use_cluster.change(
+            fn=toggle_cluster,
+            inputs=use_cluster,
+            outputs=[cluster_size, cluster_image, create_cluster_btn, validate_cluster_btn, destroy_cluster_btn],
+        )
 
         run_btn.click(
             fn=stream_runner,
-            inputs=[goal, scenario, fast, use_dml, dml_top_k, use_playground, playground_image, auto_remove_playground],
+            inputs=[
+                goal,
+                scenario,
+                fast,
+                use_dml,
+                dml_top_k,
+                use_playground,
+                playground_image,
+                auto_remove_playground,
+                use_cluster,
+                cluster_image,
+                cluster_size,
+            ],
             outputs=[
                 metrics_card,
                 timeline,
@@ -616,6 +781,14 @@ def build_ui() -> gr.Blocks:
                 remove_playground_btn,
                 delete_workspace_btn,
                 playground_name_state,
+                cluster_status,
+                cluster_run_id_display,
+                cluster_workspace_host,
+                cluster_workspace_container,
+                cluster_validation,
+                destroy_cluster_btn,
+                delete_cluster_workspace_btn,
+                cluster_run_id_state,
             ],
             show_progress=True,
         )
@@ -630,6 +803,39 @@ def build_ui() -> gr.Blocks:
             fn=remove_workspace,
             inputs=[playground_workspace_host],
             outputs=[delete_status, delete_workspace_btn],
+        )
+
+        create_cluster_btn.click(
+            fn=create_cluster,
+            inputs=[cluster_size, cluster_image],
+            outputs=[
+                cluster_status,
+                cluster_run_id_display,
+                cluster_workspace_host,
+                cluster_workspace_container,
+                cluster_validation,
+                destroy_cluster_btn,
+                delete_cluster_workspace_btn,
+                cluster_run_id_state,
+            ],
+        )
+
+        validate_cluster_btn.click(
+            fn=validate_cluster,
+            inputs=[cluster_run_id_state],
+            outputs=[cluster_validation],
+        )
+
+        destroy_cluster_btn.click(
+            fn=destroy_cluster,
+            inputs=[cluster_run_id_state],
+            outputs=[cluster_status, delete_cluster_status, destroy_cluster_btn],
+        )
+
+        delete_cluster_workspace_btn.click(
+            fn=remove_workspace,
+            inputs=[cluster_workspace_host],
+            outputs=[delete_cluster_status, delete_cluster_workspace_btn],
         )
 
     return demo

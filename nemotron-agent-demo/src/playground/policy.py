@@ -20,6 +20,8 @@ ALLOWLIST = {
     "make",
     "ls",
     "cat",
+    "curl",
+    "jq",
     "sed",
     "grep",
 }

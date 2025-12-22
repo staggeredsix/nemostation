@@ -6,8 +6,17 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         curl \
+        jq \
         git \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+        fastapi \
+        gradio \
+        pydantic \
+        redis \
+        requests \
+        uvicorn
 
 RUN useradd -ms /bin/bash playground
 

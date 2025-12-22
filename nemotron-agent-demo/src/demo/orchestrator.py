@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
 
 from src.memory import dml_http_client
+from src.playground import cluster_manager
 from src.playground import manager as playground_manager
 
 from .agents import AgentResult, call_agent
@@ -61,6 +62,7 @@ def _serialize(
     final: str,
     total_ms: float,
     playground: Optional[Dict] = None,
+    cluster: Optional[Dict] = None,
     dml: Optional[Dict] = None,
 ) -> Dict:
     completed = [s for s in stages if s.status == "done"]
@@ -79,6 +81,7 @@ def _serialize(
         },
         "final": final,
         "playground": playground or {},
+        "cluster": cluster or {},
         "dml": dml or {},
     }
 
@@ -107,6 +110,16 @@ def _extract_tool_requests(text: str) -> List[Dict[str, Any]]:
 def _format_tool_context(entry: Dict[str, Any]) -> str:
     return (
         "Playground command result:\n"
+        f"$ {entry.get('cmd')}\n"
+        f"Exit code: {entry.get('exit_code')}\n"
+        f"Stdout:\n{entry.get('stdout')}\n"
+        f"Stderr:\n{entry.get('stderr')}\n"
+    )
+
+
+def _format_cluster_context(entry: Dict[str, Any]) -> str:
+    return (
+        "Cluster command result:\n"
         f"$ {entry.get('cmd')}\n"
         f"Exit code: {entry.get('exit_code')}\n"
         f"Stdout:\n{entry.get('stdout')}\n"
@@ -145,6 +158,9 @@ def run_demo_stream(
     use_playground: bool = False,
     playground_image: str = "nemotron-playground:latest",
     auto_remove_playground: bool = False,
+    use_cluster: bool = False,
+    cluster_image: str = "nemotron-playground:latest",
+    cluster_size: int = 3,
 ) -> Generator[Dict, None, None]:
     stages: List[StageState] = []
     stage_order = ["planner", "coder", "reviewer"]
@@ -171,6 +187,24 @@ def run_demo_stream(
         "workspace_host": "",
         "workspace_container": "",
     }
+    cluster_log: List[Dict[str, Any]] = []
+    cluster_info: Dict[str, Any] = {
+        "enabled": bool(use_cluster),
+        "run_id": run_id,
+        "size": cluster_size,
+        "image": cluster_image,
+        "status": "disabled" if not use_cluster else "pending",
+        "network": "",
+        "containers": [],
+        "api_port": None,
+        "web_port": None,
+        "workspace_host": "",
+        "workspace_container": "",
+        "error": None,
+        "validation": {},
+        "log": cluster_log,
+        "ready_for_removal": False,
+    }
     if use_playground:
         playground_status = playground_manager.ensure_playground(playground_image, playground_name, run_id, repo_mount=None)
         playground_info.update(
@@ -184,8 +218,26 @@ def run_demo_stream(
                 "requested_image": playground_status.get("requested_image", playground_image),
             }
         )
+    if use_cluster:
+        cluster_status = cluster_manager.create_cluster(run_id, cluster_image, cluster_size, workspace_host=None)
+        cluster_info.update(
+            {
+                "status": cluster_status.get("status", "unknown"),
+                "error": cluster_status.get("error"),
+                "network": cluster_status.get("network", ""),
+                "containers": cluster_status.get("containers", []),
+                "api_port": cluster_status.get("api_port"),
+                "web_port": cluster_status.get("web_port"),
+                "workspace_host": cluster_status.get("workspace_host", ""),
+                "workspace_container": cluster_status.get("workspace_container", ""),
+            }
+        )
+        if cluster_status.get("log"):
+            cluster_log.extend(cluster_status.get("log", []))
 
     scenario_key = scenario or "general"
+    if use_cluster:
+        scenario_key = f"{scenario_key}-cluster-{cluster_size}"
     dml_error: Optional[str] = None
     dml_enabled = False
     dml_get_calls = 0
@@ -235,7 +287,7 @@ def run_demo_stream(
     }
 
     start_time = time.perf_counter()
-    yield _serialize(stages, goal, scenario, final="", total_ms=0, playground=playground_info, dml=dml_info)
+    yield _serialize(stages, goal, scenario, final="", total_ms=0, playground=playground_info, cluster=cluster_info, dml=dml_info)
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
@@ -255,10 +307,38 @@ def run_demo_stream(
             "workspace_container": playground_info.get("workspace_container"),
             "enabled": playground_info.get("enabled"),
         },
+        "cluster": {
+            "run_id": run_id,
+            "size": cluster_size,
+            "image": cluster_image,
+            "network": cluster_info.get("network"),
+            "containers": cluster_info.get("containers"),
+            "api_port": cluster_info.get("api_port"),
+            "web_port": cluster_info.get("web_port"),
+            "api_url": f"http://localhost:{cluster_info.get('api_port')}" if cluster_info.get("api_port") else None,
+            "web_url": f"http://localhost:{cluster_info.get('web_port')}" if cluster_info.get("web_port") else None,
+            "workspace_host": cluster_info.get("workspace_host"),
+            "workspace_container": cluster_info.get("workspace_container"),
+            "enabled": cluster_info.get("enabled"),
+        },
     }
     base_system_messages: List[str] = []
     if dml_enabled and cookbook_info["found"] and cookbook_info["cookbook_text"]:
         base_system_messages.append(f"DML_COOKBOOK_GUIDANCE:\n{cookbook_info['cookbook_text']}")
+    if use_cluster:
+        container_list = ", ".join([c.get("name", "") for c in cluster_info.get("containers", [])])
+        base_system_messages.append(
+            "CLUSTER_TOPOLOGY:\n"
+            f"- run_id: {run_id}\n"
+            f"- network: {cluster_info.get('network')}\n"
+            f"- containers: {container_list or 'none'}\n"
+            f"- api_host_port: {cluster_info.get('api_port')}\n"
+            f"- web_host_port: {cluster_info.get('web_port')}\n"
+            f"- api_url: http://localhost:{cluster_info.get('api_port')}\n"
+            f"- web_url: http://localhost:{cluster_info.get('web_port')}\n"
+            f"- workspace_host: {cluster_info.get('workspace_host')}\n"
+            f"- workspace_container: {cluster_info.get('workspace_container')}\n"
+        )
 
     for stage_name in stage_order:
         _update_stage(stages, stage_name, status="running")
@@ -269,6 +349,7 @@ def run_demo_stream(
             final="",
             total_ms=(time.perf_counter() - start_time) * 1000,
             playground=playground_info,
+            cluster=cluster_info,
             dml=dml_info,
         )
 
@@ -280,7 +361,7 @@ def run_demo_stream(
                 extra_context = "\n\n".join(context_parts)
             if tool_context_chunks:
                 tool_context = "\n\n".join(tool_context_chunks)
-                extra_context = "\n\n".join(filter(None, [extra_context, f"Playground Command Log:\n{tool_context}"]))
+                extra_context = "\n\n".join(filter(None, [extra_context, f"Tool Command Log:\n{tool_context}"]))
             max_tokens = 384 if fast else 640
             if stage_name == "aggregator":
                 max_tokens = 320 if fast else 512
@@ -289,6 +370,10 @@ def run_demo_stream(
                 system_messages.append(
                     "All generated files must be written under /workspace inside the playground container. "
                     "Use tool steps to create files and run commands."
+                )
+            if long_run_mode and use_cluster and stage_name == "coder":
+                system_messages.append(
+                    "Cluster tools are available: use cluster.exec for container commands and cluster.validate for validation."
                 )
             result = call_agent(
                 stage_name,
@@ -314,12 +399,13 @@ def run_demo_stream(
                 "system_messages": base_system_messages,
                 "max_tokens": max_tokens,
             }
-            if long_run_mode and use_playground:
+            if long_run_mode and (use_playground or use_cluster):
                 tool_requests = _extract_tool_requests(result.output)
                 tool_entries: List[Dict[str, Any]] = []
                 for request in tool_requests[:MAX_TOOL_REQUESTS_PER_STAGE]:
                     tool_name = request.get("tool")
-                    if tool_name == "playground.exec":
+                    entry: Dict[str, Any]
+                    if tool_name == "playground.exec" and use_playground:
                         cmd = request.get("cmd")
                         timeout_s = int(request.get("timeout_s", 60))
                         if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
@@ -332,7 +418,9 @@ def run_demo_stream(
                         else:
                             entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
                             entry["cmd"] = " ".join(cmd)
-                    elif tool_name == "playground.write_file":
+                        tool_context_chunks.append(_format_tool_context(entry))
+                        playground_log.append(entry)
+                    elif tool_name == "playground.write_file" and use_playground:
                         path = request.get("path")
                         content = request.get("content")
                         if not isinstance(path, str) or not isinstance(content, str):
@@ -345,45 +433,73 @@ def run_demo_stream(
                         else:
                             entry = playground_manager.write_file(playground_name, path, content)
                             entry["cmd"] = f"write_file {path}"
+                        tool_context_chunks.append(_format_tool_context(entry))
+                        playground_log.append(entry)
+                    elif tool_name == "cluster.exec" and use_cluster:
+                        container = request.get("container")
+                        cmd = request.get("cmd")
+                        timeout_s = int(request.get("timeout_s", 60))
+                        if not isinstance(container, str) or not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+                            entry = {
+                                "cmd": f"{container} {cmd}",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid cluster.exec payload. Expected container + cmd list.",
+                            }
+                        else:
+                            entry = cluster_manager.exec_in(container, cmd, timeout_s=timeout_s)
+                            entry["cmd"] = f"{container} :: {' '.join(cmd)}"
+                        tool_context_chunks.append(_format_cluster_context(entry))
+                        cluster_log.append(entry)
+                    elif tool_name == "cluster.validate" and use_cluster:
+                        validation = cluster_manager.validate_cluster(run_id)
+                        cluster_info["validation"] = validation
+                        entry = {
+                            "cmd": "cluster.validate",
+                            "exit_code": 0 if validation.get("ok") else 1,
+                            "stdout": json.dumps(validation, indent=2),
+                            "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                        }
+                        tool_context_chunks.append(_format_cluster_context(entry))
+                        cluster_log.append(entry)
                     else:
                         continue
                     tool_entries.append(entry)
-                    tool_context_chunks.append(_format_tool_context(entry))
-                    playground_log.append(entry)
                 if tool_entries:
                     stage_trace["tool_requests"] = tool_entries
-                fixed_command = FIXED_PLAYGROUND_COMMANDS.get(stage_name)
-                if fixed_command:
-                    fixed_entry = _run_playground_command(
-                        playground_name,
-                        fixed_command,
-                        playground_log,
-                        tool_context_chunks,
-                    )
-                    stage_trace["playground_commands"] = [fixed_entry]
-                if stage_name == "planner":
-                    skeleton_entries = []
-                    skeleton_entries.append(
-                        _run_playground_command(
+                if use_playground:
+                    fixed_command = FIXED_PLAYGROUND_COMMANDS.get(stage_name)
+                    if fixed_command:
+                        fixed_entry = _run_playground_command(
                             playground_name,
-                            ["bash", "-lc", "mkdir -p /workspace/app /workspace/tests"],
+                            fixed_command,
                             playground_log,
                             tool_context_chunks,
                         )
-                    )
-                    skeleton_entries.append(
-                        _run_playground_command(
-                            playground_name,
-                            [
-                                "bash",
-                                "-lc",
-                                "cat <<'EOF' > /workspace/README.md\n# Workspace\n\nInitialized by long-run mode.\nEOF",
-                            ],
-                            playground_log,
-                            tool_context_chunks,
+                        stage_trace["playground_commands"] = [fixed_entry]
+                    if stage_name == "planner":
+                        skeleton_entries = []
+                        skeleton_entries.append(
+                            _run_playground_command(
+                                playground_name,
+                                ["bash", "-lc", "mkdir -p /workspace/app /workspace/tests"],
+                                playground_log,
+                                tool_context_chunks,
+                            )
                         )
-                    )
-                    stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
+                        skeleton_entries.append(
+                            _run_playground_command(
+                                playground_name,
+                                [
+                                    "bash",
+                                    "-lc",
+                                    "cat <<'EOF' > /workspace/README.md\n# Workspace\n\nInitialized by long-run mode.\nEOF",
+                                ],
+                                playground_log,
+                                tool_context_chunks,
+                            )
+                        )
+                        stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
             trace["stages"][stage_name] = stage_trace
             _update_stage(
                 stages,
@@ -429,6 +545,7 @@ def run_demo_stream(
             final=final_text,
             total_ms=total_ms,
             playground=playground_info,
+            cluster=cluster_info,
             dml=dml_info,
         )
 
@@ -450,8 +567,11 @@ def run_demo_stream(
                     final=final_text,
                     total_ms=total_ms,
                     playground=playground_info,
+                    cluster=cluster_info,
                     dml=dml_info,
                 )
+            if use_cluster:
+                cluster_info["ready_for_removal"] = True
             if outputs:
                 break
             return
@@ -460,6 +580,20 @@ def run_demo_stream(
     final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
     if playground_log:
         trace["playground"]["log"] = playground_log
+    if use_cluster:
+        validation = cluster_manager.validate_cluster(run_id)
+        cluster_info["validation"] = validation
+        cluster_log.append(
+            {
+                "cmd": "cluster.validate (auto)",
+                "exit_code": 0 if validation.get("ok") else 1,
+                "stdout": json.dumps(validation, indent=2),
+                "stderr": "" if validation.get("ok") else validation.get("error", ""),
+            }
+        )
+        trace["cluster"]["validation"] = validation
+        if cluster_log:
+            trace["cluster"]["log"] = cluster_log
     if use_dml and dml_enabled:
         run_report = {
             "scenario_key": scenario_key,
@@ -468,11 +602,13 @@ def run_demo_stream(
             "trace": trace,
             "final": final_text,
             "success": not failed,
-            "artifacts": [{"type": "playground_command", **entry} for entry in playground_log],
+            "artifacts": [{"type": "playground_command", **entry} for entry in playground_log]
+            + [{"type": "cluster_command", **entry} for entry in cluster_log],
             "meta": {
                 "scenario": scenario,
                 "fast": fast,
                 "cookbook_sources": cookbook_info["sources"],
+                "cluster_topology": trace.get("cluster"),
             },
         }
         try:
@@ -503,6 +639,8 @@ def run_demo_stream(
             else:
                 playground_info["status"] = "error"
                 playground_info["error"] = removal.get("error")
+    if use_cluster:
+        cluster_info["ready_for_removal"] = True
     yield _serialize(
         stages,
         goal,
@@ -510,6 +648,7 @@ def run_demo_stream(
         final=final_text,
         total_ms=total_ms,
         playground=playground_info,
+        cluster=cluster_info,
         dml=dml_info,
     )
 
@@ -523,6 +662,9 @@ def run_demo(
     use_playground: bool = False,
     playground_image: str = "nemotron-playground:latest",
     auto_remove_playground: bool = False,
+    use_cluster: bool = False,
+    cluster_image: str = "nemotron-playground:latest",
+    cluster_size: int = 3,
 ) -> Dict:
     last_state = {}
     for state in run_demo_stream(
@@ -534,6 +676,9 @@ def run_demo(
         use_playground=use_playground,
         playground_image=playground_image,
         auto_remove_playground=auto_remove_playground,
+        use_cluster=use_cluster,
+        cluster_image=cluster_image,
+        cluster_size=cluster_size,
     ):
         last_state = deepcopy(state)
     return last_state
