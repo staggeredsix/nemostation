@@ -112,7 +112,7 @@ def _openai_client() -> OpenAI:
 
 def _summary_settings() -> Dict[str, Any]:
     return {
-        "input_budget_tokens": int(os.getenv("DML_SUMMARY_INPUT_BUDGET", "12000")),
+        "input_budget_tokens": int(os.getenv("DML_SUMMARY_INPUT_BUDGET_TOKENS", "12000")),
         "max_tokens": int(os.getenv("DML_SUMMARY_MAX_TOKENS", "512")),
         "chunk_max_tokens": int(os.getenv("DML_SUMMARY_CHUNK_MAX_TOKENS", "256")),
         "temperature": 0,
@@ -120,8 +120,8 @@ def _summary_settings() -> Dict[str, Any]:
     }
 
 
-def _build_cookbook_prompt(payload: RunReportRequest) -> str:
-    trace_json = json.dumps(payload.trace, ensure_ascii=False, sort_keys=True)
+def _build_cookbook_prompt(payload: RunReportRequest, trace_text: Optional[str] = None) -> str:
+    trace_json = trace_text if trace_text is not None else json.dumps(payload.trace, ensure_ascii=False, sort_keys=True)
     meta_json = json.dumps(payload.meta or {}, ensure_ascii=False, sort_keys=True)
     return "\n".join(
         [
@@ -217,6 +217,27 @@ def _split_text_by_tokens(text: str, tokenizer: Optional[Any], budget_tokens: in
     if current:
         chunks.append("\n".join(current))
     return chunks
+
+
+def _truncate_head_tail(text: str, tokenizer: Optional[Any], head_tokens: int, tail_tokens: int) -> str:
+    if not text or (head_tokens <= 0 and tail_tokens <= 0):
+        return ""
+    if tokenizer is None:
+        head_chars = max(head_tokens, 0) * 4
+        tail_chars = max(tail_tokens, 0) * 4
+        if head_chars + tail_chars >= len(text):
+            return text
+        if tail_chars <= 0:
+            return text[:head_chars]
+        return text[:head_chars] + text[-tail_chars:]
+    encoded = tokenizer.encode(text, add_special_tokens=False)
+    if head_tokens + tail_tokens >= len(encoded):
+        return text
+    head_tokens = max(head_tokens, 0)
+    tail_tokens = max(tail_tokens, 0)
+    head = encoded[:head_tokens] if head_tokens > 0 else []
+    tail = encoded[-tail_tokens:] if tail_tokens > 0 else []
+    return tokenizer.decode(head + tail)
 
 
 def _format_stage_chunk(stage_name: str, stage: Dict[str, Any]) -> str:
@@ -333,81 +354,53 @@ def _call_summarizer(
 def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int, Dict[str, Any]]:
     start = time.perf_counter()
     settings = _summary_settings()
-    model = os.getenv("DML_OPENAI_MODEL", "").strip()
-    if not model:
-        raise RuntimeError("DML_OPENAI_MODEL is not set")
-    client = _openai_client()
-    tokenizer = _get_tokenizer(model)
     summary_meta: Dict[str, Any] = {
         "input_budget_tokens": settings["input_budget_tokens"],
         "output_tokens": settings["max_tokens"],
         "chunk_count": 0,
     }
-    trace_json = json.dumps(payload.trace, ensure_ascii=False, sort_keys=True)
-    summary_meta["raw_trace_tokens_est"] = _estimate_tokens(trace_json, tokenizer)
     try:
+        model = os.getenv("DML_OPENAI_MODEL", "").strip()
+        if not model:
+            raise RuntimeError("DML_OPENAI_MODEL is not set")
+        client = _openai_client()
+        tokenizer = _get_tokenizer(model)
+        trace_json = json.dumps(payload.trace, ensure_ascii=False, sort_keys=True)
+        raw_tokens_est = _estimate_tokens(trace_json, tokenizer)
+        summary_meta["raw_trace_tokens_est"] = raw_tokens_est
         system_message = {"role": "system", "content": "You are a precise summariser. Output only the cookbook summary."}
-        prompt = _build_cookbook_prompt(payload)
+        truncation_applied = False
+        truncated_trace = trace_json
+        head_tokens = 1500
+        overhead_margin = 500
+        tail_tokens = max(settings["input_budget_tokens"] - head_tokens - overhead_margin, 0)
+        if raw_tokens_est > settings["input_budget_tokens"]:
+            truncation_applied = True
+            truncated_trace = _truncate_head_tail(trace_json, tokenizer, head_tokens, tail_tokens)
+        truncated_tokens_est = _estimate_tokens(truncated_trace, tokenizer)
+        summary_meta["truncated_trace_tokens_est"] = truncated_tokens_est
+        summary_meta["trace_truncated"] = truncation_applied
+        prompt = _build_cookbook_prompt(payload, trace_text=truncated_trace)
         messages = [system_message, {"role": "user", "content": prompt}]
-        input_tokens = _estimate_message_tokens(messages, tokenizer)
-        if input_tokens <= settings["input_budget_tokens"]:
-            summary = _call_summarizer(
-                client,
-                model,
-                messages,
-                settings["max_tokens"],
-                tokenizer,
-                summary_meta,
-                "cookbook_final",
-            )
-        else:
-            chunk_texts = _build_stage_chunks(payload)
-            chunk_prompts: List[str] = []
-            for chunk_text in chunk_texts:
-                chunk_prompts.extend(
-                    _split_text_by_tokens(
-                        chunk_text,
-                        tokenizer,
-                        max(settings["input_budget_tokens"] // 2, 1),
-                    )
-                )
-            chunk_summaries: List[str] = []
-            summary_meta["chunk_count"] = len(chunk_prompts)
-            for idx, chunk_text in enumerate(chunk_prompts, start=1):
-                chunk_prompt = _build_chunk_prompt(chunk_text)
-                chunk_messages = [system_message, {"role": "user", "content": chunk_prompt}]
-                chunk_messages[1]["content"] = _truncate_text_to_budget(
-                    chunk_messages[1]["content"],
-                    tokenizer,
-                    settings["input_budget_tokens"] - _estimate_tokens(system_message["content"], tokenizer),
-                )
-                chunk_summary = _call_summarizer(
-                    client,
-                    model,
-                    chunk_messages,
-                    settings["chunk_max_tokens"],
-                    tokenizer,
-                    summary_meta,
-                    f"chunk_{idx}",
-                )
-                if chunk_summary:
-                    chunk_summaries.append(chunk_summary)
-            final_prompt = _build_cookbook_prompt_from_chunks(payload, chunk_summaries)
-            final_messages = [system_message, {"role": "user", "content": final_prompt}]
-            final_messages[1]["content"] = _truncate_text_to_budget(
-                final_messages[1]["content"],
+        prompt_tokens_est = _estimate_message_tokens(messages, tokenizer)
+        if prompt_tokens_est > settings["input_budget_tokens"]:
+            messages[1]["content"] = _truncate_text_to_budget(
+                messages[1]["content"],
                 tokenizer,
                 settings["input_budget_tokens"] - _estimate_tokens(system_message["content"], tokenizer),
             )
-            summary = _call_summarizer(
-                client,
-                model,
-                final_messages,
-                settings["max_tokens"],
-                tokenizer,
-                summary_meta,
-                "cookbook_final",
-            )
+            prompt_tokens_est = _estimate_message_tokens(messages, tokenizer)
+            summary_meta["hard_truncated"] = True
+        summary_meta["prompt_tokens_est"] = prompt_tokens_est
+        summary = _call_summarizer(
+            client,
+            model,
+            messages,
+            settings["max_tokens"],
+            tokenizer,
+            summary_meta,
+            "cookbook_final",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Cookbook summarization failed, falling back: %s", exc)
         summary_meta["summary_source"] = "fallback"
@@ -422,11 +415,15 @@ def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int, Dict[str, 
     summary_meta.setdefault("summary_source", "llm")
     latency_ms = int((time.perf_counter() - start) * 1000)
     logger.info(
-        "DML cookbook summary meta: source=%s raw_trace_tokens_est=%s chunk_count=%s per_call_input_tokens_est=%s",
+        "DML cookbook summary meta: source=%s raw_trace_tokens_est=%s truncated_trace_tokens_est=%s "
+        "trace_truncated=%s chunk_count=%s per_call_input_tokens_est=%s prompt_tokens_est=%s",
         summary_meta.get("summary_source"),
         summary_meta.get("raw_trace_tokens_est"),
+        summary_meta.get("truncated_trace_tokens_est"),
+        summary_meta.get("trace_truncated"),
         summary_meta.get("chunk_count"),
         summary_meta.get("per_call_input_tokens_est"),
+        summary_meta.get("prompt_tokens_est"),
     )
     return summary.strip(), latency_ms, summary_meta
 
