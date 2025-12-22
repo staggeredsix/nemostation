@@ -69,6 +69,34 @@ def render_progress(stages: List[Dict]) -> str:
     return f"<div class='progress-shell'><div class='progress-fill' style='width:{pct}%;'></div></div>"
 
 
+def render_dml_stream(dml_info: Dict) -> str:
+    requested = bool(dml_info.get("requested"))
+    enabled = bool(dml_info.get("enabled"))
+    error = dml_info.get("error")
+    counters = dml_info.get("counters", {}) or {}
+    get_calls = counters.get("dml_get_calls_per_run", 0)
+    ingest_calls = counters.get("dml_ingest_calls_per_run", 0)
+    error_state = bool(error) and requested and not enabled
+
+    request_state = "on" if requested else "off"
+    cookbook_state = "on" if get_calls > 0 else "off"
+    ingest_state = "on" if ingest_calls > 0 else "off"
+    stream_state = "error" if error_state else ("on" if enabled else "off")
+    error_note = f"<span class='dml-stream-error'>{error}</span>" if error_state else ""
+    return (
+        "<div class='dml-stream'>"
+        "<div class='dml-stream-title'>DML stream</div>"
+        f"<div class='dml-light {stream_state}' title='DML status'></div>"
+        "<div class='dml-stream-steps'>"
+        f"<div class='dml-step'><span class='dml-light {request_state}'></span>Requested</div>"
+        f"<div class='dml-step'><span class='dml-light {cookbook_state}'></span>Cookbook</div>"
+        f"<div class='dml-step'><span class='dml-light {ingest_state}'></span>Ingest</div>"
+        f"{error_note}"
+        "</div>"
+        "</div>"
+    )
+
+
 def render_timeline(state: Dict) -> str:
     dml_info = state.get("dml", {})
     dml_enabled = bool(dml_info.get("enabled"))
@@ -353,7 +381,7 @@ def stream_runner(
         cluster_size=cluster_size,
     ):
         metrics_html = render_metrics(state)
-        timeline_html = render_progress(state["stages"]) + render_timeline(state)
+        timeline_html = render_progress(state["stages"]) + render_dml_stream(state.get("dml", {})) + render_timeline(state)
         outputs = render_agent_outputs(state)
         final_text = state.get("final", "")
         cookbook_panel = render_cookbook_panel(state)
@@ -410,8 +438,8 @@ def stream_runner(
 
 def build_ui() -> gr.Blocks:
     css = CSS_PATH.read_text()
-    with gr.Blocks(css=css, theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# Nemotron-3 Nano Agentic Demo — HF + Transformers")
+    with gr.Blocks(css=css, theme=gr.themes.Soft(), title="Nemoyron 3 Nano Agentic Playground") as demo:
+        gr.Markdown("# Nemoyron 3 Nano Agentic Playground")
         docker_banner = gr.HTML()
         with gr.Row():
             with gr.Column(scale=1):
@@ -452,35 +480,35 @@ def build_ui() -> gr.Blocks:
                 delete_status = gr.Markdown(value="")
                 delete_cluster_status = gr.Markdown(value="")
             with gr.Column(scale=2):
-                cookbook_panel = gr.HTML(elem_classes=["card"])
-                ingest_panel = gr.HTML(elem_classes=["card"])
+                cookbook_panel = gr.HTML(elem_classes=["card", "scroll-panel"])
+                ingest_panel = gr.HTML(elem_classes=["card", "scroll-panel"])
                 with gr.Tab("Timeline"):
                     metrics_card = gr.HTML()
-                    timeline = gr.HTML(elem_classes=["card"])
+                    timeline = gr.HTML(elem_classes=["card", "scroll-panel"])
                 with gr.Tab("Agent Outputs"):
-                    planner_box = gr.Textbox(label="Planner", lines=6)
-                    coder_box = gr.Textbox(label="Coder", lines=6)
-                    reviewer_box = gr.Textbox(label="Reviewer", lines=6)
-                    ops_box = gr.Textbox(label="Ops", lines=6)
-                    aggregator_box = gr.Textbox(label="Aggregator", lines=6)
+                    planner_box = gr.Textbox(label="Planner", lines=6, elem_classes=["text-panel"])
+                    coder_box = gr.Textbox(label="Coder", lines=6, elem_classes=["text-panel"])
+                    reviewer_box = gr.Textbox(label="Reviewer", lines=6, elem_classes=["text-panel"])
+                    ops_box = gr.Textbox(label="Ops", lines=6, elem_classes=["text-panel"])
+                    aggregator_box = gr.Textbox(label="Aggregator", lines=6, elem_classes=["text-panel"])
                 with gr.Tab("Final Answer"):
-                    final_box = gr.Textbox(label="Final", lines=8)
+                    final_box = gr.Textbox(label="Final", lines=8, elem_classes=["text-panel"])
                 with gr.Tab("DML Cookbook"):
                     gr.Markdown("Cookbook guidance (beginning of run) and run report ingestion (end of run).")
-                    dml_cookbook_tab = gr.HTML()
-                    dml_ingest_tab = gr.HTML()
+                    dml_cookbook_tab = gr.HTML(elem_classes=["scroll-panel"])
+                    dml_ingest_tab = gr.HTML(elem_classes=["scroll-panel"])
                 with gr.Tab("Playground"):
                     with gr.Row():
                         playground_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
                         playground_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
                     gr.Markdown("Playground command execution log (truncated).")
-                    playground_log = gr.Textbox(label="Playground log", lines=12)
+                    playground_log = gr.Textbox(label="Playground log", lines=12, elem_classes=["text-panel"])
                 with gr.Tab("Cluster"):
                     with gr.Row():
                         cluster_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
                         cluster_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
                     gr.Markdown("Cluster validation report.")
-                    cluster_validation = gr.Textbox(label="Cluster validation", lines=10)
+                    cluster_validation = gr.Textbox(label="Cluster validation", lines=10, elem_classes=["text-panel"])
 
         with gr.Tab("Prompts"):
             with gr.Tab("Goal Presets"):
