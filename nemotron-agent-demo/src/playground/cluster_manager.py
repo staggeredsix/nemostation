@@ -22,7 +22,7 @@ RESOURCE_LIMITS = {
     "pids": "256",
 }
 REDIS_IMAGE = "redis:7-alpine"
-ALLOWED_DOCKER_COMMANDS = {"inspect", "run", "exec", "rm", "network", "ps"}
+ALLOWED_DOCKER_COMMANDS = {"inspect", "run", "exec", "rm", "network", "ps", "logs"}
 ALLOWED_NETWORK_SUBCOMMANDS = {"create", "rm", "inspect"}
 
 
@@ -271,6 +271,26 @@ def exec_in(name: str, cmd: List[str], timeout_s: int = policy.DEFAULT_COMMAND_T
         *cmd,
     ]
     result = _run_docker(exec_args, timeout_s=timeout_s + 15)
+    if result is None:
+        return {"exit_code": 127, "stdout": "", "stderr": "docker not available"}
+    return {
+        "exit_code": result.returncode,
+        "stdout": _clamp(result.stdout),
+        "stderr": _clamp(result.stderr),
+    }
+
+
+def container_logs(name: str, tail: int = 200, timeout_s: int = 15) -> Dict[str, Any]:
+    run_id = _extract_run_id(name)
+    if not run_id:
+        return {"exit_code": 126, "stdout": "", "stderr": "Container name must use nemotron-play-<runid>- prefix."}
+    name_error = _validate_container_name(name, run_id)
+    if name_error:
+        return {"exit_code": 126, "stdout": "", "stderr": name_error}
+    if not isinstance(tail, int):
+        return {"exit_code": 126, "stdout": "", "stderr": "Log tail must be an integer."}
+    tail = max(1, min(tail, 2000))
+    result = _run_docker(["logs", "--tail", str(tail), name], timeout_s=timeout_s)
     if result is None:
         return {"exit_code": 127, "stdout": "", "stderr": "docker not available"}
     return {
