@@ -4,12 +4,14 @@ import json
 import logging
 import os
 import time
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from openai import OpenAI
 from pydantic import BaseModel, Field
+from transformers import AutoTokenizer
 
 logger = logging.getLogger("dml-service")
 logging.basicConfig(level=logging.INFO)
@@ -110,7 +112,9 @@ def _openai_client() -> OpenAI:
 
 def _summary_settings() -> Dict[str, Any]:
     return {
-        "max_tokens": 512,
+        "input_budget_tokens": int(os.getenv("DML_SUMMARY_INPUT_BUDGET", "12000")),
+        "max_tokens": int(os.getenv("DML_SUMMARY_MAX_TOKENS", "512")),
+        "chunk_max_tokens": int(os.getenv("DML_SUMMARY_CHUNK_MAX_TOKENS", "256")),
         "temperature": 0,
         "enable_thinking": False,
     }
@@ -152,54 +156,312 @@ def _build_cookbook_prompt(payload: RunReportRequest) -> str:
 _EMPTY_SUMMARY_LOGGED = False
 
 
-def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int]:
+@lru_cache(maxsize=1)
+def _get_tokenizer(model_name: str) -> Optional[Any]:
+    if not model_name:
+        return None
+    try:
+        local_only = os.getenv("DML_TOKENIZER_LOCAL_ONLY", "1") == "1"
+        return AutoTokenizer.from_pretrained(model_name, local_files_only=local_only)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tokenizer load failed for %s: %s", model_name, exc)
+        return None
+
+
+def _estimate_tokens(text: str, tokenizer: Optional[Any]) -> int:
+    if not text:
+        return 0
+    if tokenizer is None:
+        return max(1, len(text) // 4)
+    return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+def _estimate_message_tokens(messages: Iterable[Dict[str, str]], tokenizer: Optional[Any]) -> int:
+    return sum(_estimate_tokens(message.get("content", ""), tokenizer) for message in messages)
+
+
+def _truncate_text_to_budget(text: str, tokenizer: Optional[Any], budget_tokens: int) -> str:
+    if budget_tokens <= 0 or not text:
+        return ""
+    if _estimate_tokens(text, tokenizer) <= budget_tokens:
+        return text
+    if tokenizer is None:
+        return text[: budget_tokens * 4]
+    encoded = tokenizer.encode(text, add_special_tokens=False)
+    truncated = encoded[:budget_tokens]
+    return tokenizer.decode(truncated)
+
+
+def _split_text_by_tokens(text: str, tokenizer: Optional[Any], budget_tokens: int) -> List[str]:
+    if not text:
+        return [""]
+    if budget_tokens <= 0:
+        return [text]
+    if _estimate_tokens(text, tokenizer) <= budget_tokens:
+        return [text]
+    lines = text.splitlines()
+    chunks: List[str] = []
+    current: List[str] = []
+    current_tokens = 0
+    for line in lines:
+        line_tokens = _estimate_tokens(f"{line}\n", tokenizer)
+        if current and current_tokens + line_tokens > budget_tokens:
+            chunks.append("\n".join(current))
+            current = []
+            current_tokens = 0
+        if line_tokens > budget_tokens:
+            chunks.append(_truncate_text_to_budget(line, tokenizer, budget_tokens))
+        else:
+            current.append(line)
+            current_tokens += line_tokens
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _format_stage_chunk(stage_name: str, stage: Dict[str, Any]) -> str:
+    parts = [f"STAGE: {stage_name.upper()}"]
+    output = stage.get("output")
+    if output:
+        parts.append("OUTPUT:")
+        parts.append(str(output))
+    error = stage.get("error")
+    if error:
+        parts.append("ERROR:")
+        parts.append(str(error))
+    tokens = stage.get("tokens")
+    if tokens is not None:
+        parts.append(f"TOKENS: {tokens}")
+    return "\n".join(parts)
+
+
+def _build_stage_chunks(payload: RunReportRequest) -> List[str]:
+    trace = payload.trace or {}
+    stages = trace.get("stages", {}) if isinstance(trace, dict) else {}
+    chunks: List[str] = []
+    ordered = ["planner", "coder", "reviewer", "ops", "aggregator"]
+    seen = set()
+    for name in ordered:
+        stage = stages.get(name)
+        if stage:
+            chunks.append(_format_stage_chunk(name, stage))
+            seen.add(name)
+    for name, stage in stages.items():
+        if name in seen:
+            continue
+        chunks.append(_format_stage_chunk(name, stage))
+    errors = trace.get("errors")
+    if errors:
+        chunks.append(f"TRACE ERRORS:\n{json.dumps(errors, ensure_ascii=False, sort_keys=True)}")
+    return chunks
+
+
+def _build_chunk_prompt(chunk_text: str) -> str:
+    return "\n".join(
+        [
+            "Summarize this agent run chunk.",
+            "Return bullet points of what worked and failed.",
+            "Keep it brief and high-signal.",
+            "CHUNK:",
+            chunk_text,
+        ]
+    )
+
+
+def _build_cookbook_prompt_from_chunks(payload: RunReportRequest, chunk_summaries: List[str]) -> str:
+    meta_json = json.dumps(payload.meta or {}, ensure_ascii=False, sort_keys=True)
+    summaries = "\n\n".join(chunk_summaries)
+    return "\n".join(
+        [
+            "Summarize the following agent run into the cookbook format.",
+            "Keep it short (<= 2k chars) and high-signal.",
+            "Cookbook summary format (must be consistent):",
+            "TITLE: <scenario_key>",
+            "WHAT WORKED:",
+            "- ...",
+            "WHAT FAILED:",
+            "- ...",
+            "DECISION HEURISTICS:",
+            "- ...",
+            "PITFALLS:",
+            "- ...",
+            "NEXT TIME TRY:",
+            "- ...",
+            "KEY ARTIFACTS / LINKS (if present):",
+            "- ...",
+            "",
+            f"SCENARIO_KEY: {payload.scenario_key}",
+            f"GOAL: {payload.goal}",
+            f"RUN_ID: {payload.run_id}",
+            f"SUCCESS: {payload.success}",
+            f"FINAL: {payload.final}",
+            f"META: {meta_json}",
+            "TRACE SUMMARIES:",
+            summaries,
+        ]
+    )
+
+
+def _call_summarizer(
+    client: OpenAI,
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    tokenizer: Optional[Any],
+    summary_meta: Dict[str, Any],
+    label: str,
+) -> str:
+    start = time.perf_counter()
+    summary_meta.setdefault("per_call_input_tokens_est", []).append(_estimate_message_tokens(messages, tokenizer))
+    extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0,
+        max_tokens=max_tokens,
+        extra_body=extra_body,
+    )
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    summary_meta.setdefault("per_call_latency_ms", []).append({label: latency_ms})
+    message = response.choices[0].message
+    summary = (message.content or "").strip()
+    if not summary:
+        summary = (getattr(message, "reasoning_content", None) or "").strip()
+    return summary
+
+
+def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int, Dict[str, Any]]:
     start = time.perf_counter()
     settings = _summary_settings()
     model = os.getenv("DML_OPENAI_MODEL", "").strip()
     if not model:
         raise RuntimeError("DML_OPENAI_MODEL is not set")
-    extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
     client = _openai_client()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a precise summariser. Output only the cookbook summary.",
-            },
-            {"role": "user", "content": _build_cookbook_prompt(payload)},
-        ],
-        temperature=settings["temperature"],
-        max_tokens=settings["max_tokens"],
-        extra_body=extra_body,
-    )
-    message = response.choices[0].message
-    summary = (message.content or "").strip()
-    if not summary:
-        summary = (getattr(message, "reasoning_content", None) or "").strip()
+    tokenizer = _get_tokenizer(model)
+    summary_meta: Dict[str, Any] = {
+        "input_budget_tokens": settings["input_budget_tokens"],
+        "output_tokens": settings["max_tokens"],
+        "chunk_count": 0,
+    }
+    trace_json = json.dumps(payload.trace, ensure_ascii=False, sort_keys=True)
+    summary_meta["raw_trace_tokens_est"] = _estimate_tokens(trace_json, tokenizer)
+    try:
+        system_message = {"role": "system", "content": "You are a precise summariser. Output only the cookbook summary."}
+        prompt = _build_cookbook_prompt(payload)
+        messages = [system_message, {"role": "user", "content": prompt}]
+        input_tokens = _estimate_message_tokens(messages, tokenizer)
+        if input_tokens <= settings["input_budget_tokens"]:
+            summary = _call_summarizer(
+                client,
+                model,
+                messages,
+                settings["max_tokens"],
+                tokenizer,
+                summary_meta,
+                "cookbook_final",
+            )
+        else:
+            chunk_texts = _build_stage_chunks(payload)
+            chunk_prompts: List[str] = []
+            for chunk_text in chunk_texts:
+                chunk_prompts.extend(
+                    _split_text_by_tokens(
+                        chunk_text,
+                        tokenizer,
+                        max(settings["input_budget_tokens"] // 2, 1),
+                    )
+                )
+            chunk_summaries: List[str] = []
+            summary_meta["chunk_count"] = len(chunk_prompts)
+            for idx, chunk_text in enumerate(chunk_prompts, start=1):
+                chunk_prompt = _build_chunk_prompt(chunk_text)
+                chunk_messages = [system_message, {"role": "user", "content": chunk_prompt}]
+                chunk_messages[1]["content"] = _truncate_text_to_budget(
+                    chunk_messages[1]["content"],
+                    tokenizer,
+                    settings["input_budget_tokens"] - _estimate_tokens(system_message["content"], tokenizer),
+                )
+                chunk_summary = _call_summarizer(
+                    client,
+                    model,
+                    chunk_messages,
+                    settings["chunk_max_tokens"],
+                    tokenizer,
+                    summary_meta,
+                    f"chunk_{idx}",
+                )
+                if chunk_summary:
+                    chunk_summaries.append(chunk_summary)
+            final_prompt = _build_cookbook_prompt_from_chunks(payload, chunk_summaries)
+            final_messages = [system_message, {"role": "user", "content": final_prompt}]
+            final_messages[1]["content"] = _truncate_text_to_budget(
+                final_messages[1]["content"],
+                tokenizer,
+                settings["input_budget_tokens"] - _estimate_tokens(system_message["content"], tokenizer),
+            )
+            summary = _call_summarizer(
+                client,
+                model,
+                final_messages,
+                settings["max_tokens"],
+                tokenizer,
+                summary_meta,
+                "cookbook_final",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Cookbook summarization failed, falling back: %s", exc)
+        summary_meta["summary_source"] = "fallback"
+        summary = _fallback_cookbook(payload).strip()
     if not summary:
         global _EMPTY_SUMMARY_LOGGED
         if not _EMPTY_SUMMARY_LOGGED:
             _EMPTY_SUMMARY_LOGGED = True
-            try:
-                logger.warning("Empty cookbook summary response: %s", response.model_dump_json())
-            except Exception:  # noqa: BLE001
-                logger.warning("Empty cookbook summary response: %s", response)
+            logger.warning("Empty cookbook summary response; using fallback")
+        summary_meta["summary_source"] = "fallback"
         summary = _fallback_cookbook(payload).strip()
+    summary_meta.setdefault("summary_source", "llm")
     latency_ms = int((time.perf_counter() - start) * 1000)
-    return summary.strip(), latency_ms
+    logger.info(
+        "DML cookbook summary meta: source=%s raw_trace_tokens_est=%s chunk_count=%s per_call_input_tokens_est=%s",
+        summary_meta.get("summary_source"),
+        summary_meta.get("raw_trace_tokens_est"),
+        summary_meta.get("chunk_count"),
+        summary_meta.get("per_call_input_tokens_est"),
+    )
+    return summary.strip(), latency_ms, summary_meta
 
 
 def _fallback_cookbook(payload: RunReportRequest) -> str:
     status = "success" if payload.success else "failure"
     meta_json = json.dumps(payload.meta or {}, ensure_ascii=False, sort_keys=True)
+    trace = payload.trace if isinstance(payload.trace, dict) else {}
+    errors = trace.get("errors") or []
+    error_lines = []
+    for error in errors:
+        if isinstance(error, dict):
+            stage = error.get("stage")
+            message = error.get("error") or error.get("message") or ""
+            if stage or message:
+                error_lines.append(f"- {stage or 'stage'}: {message}".strip())
+        else:
+            error_lines.append(f"- {error}")
+    if not error_lines:
+        error_lines = ["- No error excerpts available."]
+    artifacts = payload.meta or {}
+    artifact_lines = []
+    for key in ("artifacts", "links", "urls", "files"):
+        value = artifacts.get(key) if isinstance(artifacts, dict) else None
+        if value:
+            artifact_lines.append(f"- {key}: {value}")
+    if not artifact_lines:
+        artifact_lines = [f"- RUN_ID: {payload.run_id}"]
     return "\n".join(
         [
             f"TITLE: {payload.scenario_key}",
             "WHAT WORKED:",
             f"- Run status: {status}",
             "WHAT FAILED:",
-            "- No model summary available; using basic run metadata.",
+            *error_lines,
             "DECISION HEURISTICS:",
             f"- Goal: {payload.goal}",
             "PITFALLS:",
@@ -207,7 +469,7 @@ def _fallback_cookbook(payload: RunReportRequest) -> str:
             "NEXT TIME TRY:",
             "- Re-run summarisation or provide more detailed run metadata.",
             "KEY ARTIFACTS / LINKS (if present):",
-            f"- RUN_ID: {payload.run_id}",
+            *artifact_lines,
             f"- META: {meta_json}",
         ]
     )
@@ -338,13 +600,14 @@ def ingest_run_report(request: RunReportRequest) -> RunReportResponse:
             item.meta = dict(item.meta or {})
             item.meta["superseded"] = True
             item.meta["superseded_at"] = time.time()
-        cookbook_text, summary_latency_ms = _summarize_cookbook(request)
+        cookbook_text, summary_latency_ms, summary_meta = _summarize_cookbook(request)
         cookbook_meta = {
             "scenario_key": request.scenario_key,
             "run_id": request.run_id,
             "sources": [str(report_item.id)],
             "cookbook_sources": [str(report_item.id)],
             "summary_latency_ms": summary_latency_ms,
+            "summary_meta": summary_meta,
             "kind": "cookbook",
         }
         cookbook_item = adapter.ingest_memory(
