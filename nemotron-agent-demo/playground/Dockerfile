@@ -14,9 +14,12 @@ RUN pip install --no-cache-dir \
         fastapi \
         gradio \
         pydantic \
+        pytest \
         redis \
         requests \
         uvicorn
+
+RUN python -c "import requests, redis; print('deps ok')"
 
 RUN useradd -ms /bin/bash playground
 

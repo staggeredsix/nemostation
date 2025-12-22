@@ -290,6 +290,11 @@ def render_cluster_status(state: Dict) -> str:
             f"<div>Container workspace: {workspace_container or '—'}</div>"
             "</div>"
         )
+    iteration = cluster.get("iteration", 0)
+    max_iters = cluster.get("max_iters", 0)
+    iteration_html = ""
+    if max_iters:
+        iteration_html = f"<div>Iteration: {iteration} / {max_iters}</div>"
     return (
         "<div class='card'>"
         "<h3>Cluster</h3>"
@@ -298,6 +303,7 @@ def render_cluster_status(state: Dict) -> str:
         f"<div>Containers: {container_html}</div>"
         f"<div>API URL: {api_url}</div>"
         f"<div>Web URL: {web_url}</div>"
+        f"{iteration_html}"
         f"{workspace_html}"
         f"{error_html}"
         "</div>"
@@ -307,14 +313,38 @@ def render_cluster_status(state: Dict) -> str:
 def render_cluster_validation(state: Dict) -> str:
     cluster = state.get("cluster", {})
     validation = cluster.get("validation", {})
-    if not validation:
+    history = cluster.get("validation_history", []) or []
+    iteration = cluster.get("iteration", 0)
+    max_iters = cluster.get("max_iters", 0)
+    if not validation and not history:
         return "No validation run yet."
-    checks = validation.get("checks", [])
-    lines = [f"Overall: {'PASS' if validation.get('ok') else 'FAIL'}"]
-    for check in checks:
-        status = "PASS" if check.get("ok") else "FAIL"
-        detail = check.get("detail", "")
-        lines.append(f"- {check.get('name')}: {status} {detail}")
+    lines = []
+    if max_iters:
+        lines.append(f"Iteration: {iteration} / {max_iters}")
+    if history:
+        for record in history:
+            report = record.get("validation", {})
+            checks = report.get("checks", [])
+            lines.append(f"Iteration {record.get('iteration')}: {'PASS' if report.get('ok') else 'FAIL'}")
+            for check in checks:
+                status = "PASS" if check.get("ok") else "FAIL"
+                detail = check.get("detail", "")
+                lines.append(f"  - {check.get('name')}: {status} {detail}")
+    else:
+        checks = validation.get("checks", [])
+        lines.append(f"Overall: {'PASS' if validation.get('ok') else 'FAIL'}")
+        for check in checks:
+            status = "PASS" if check.get("ok") else "FAIL"
+            detail = check.get("detail", "")
+            lines.append(f"- {check.get('name')}: {status} {detail}")
+    actions = cluster.get("fix_actions", []) or []
+    if actions:
+        lines.append("")
+        lines.append("Fix actions:")
+        for action in actions:
+            lines.append(
+                f"- Iter {action.get('iteration')}: {action.get('action')} (exit {action.get('exit_code')})"
+            )
     return "\n".join(lines)
 
 
@@ -532,7 +562,7 @@ def build_ui() -> gr.Blocks:
             with gr.Tab("Agent Prompts"):
                 agent_dropdown = gr.Dropdown(
                     label="Agent",
-                    choices=["system", "planner", "coder", "reviewer", "ops", "aggregator"],
+                    choices=["system", "planner", "coder", "reviewer", "ops", "aggregator", "fixer"],
                     value="system",
                 )
                 badge_holder = gr.HTML(value="")
