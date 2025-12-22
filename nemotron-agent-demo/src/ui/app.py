@@ -355,16 +355,24 @@ def render_playground_log(state: Dict) -> str:
         return f"{text[:limit]}...\n[truncated]"
 
     playground = state.get("playground", {})
-    if not playground.get("enabled"):
+    cluster = state.get("cluster", {})
+    playground_enabled = bool(playground.get("enabled"))
+    cluster_enabled = bool(cluster.get("enabled"))
+    if not playground_enabled and not cluster_enabled:
         return "Playground disabled."
-    log_entries = playground.get("log", []) or []
+    log_entries: List[tuple[str, Dict[str, str]]] = []
+    for entry in playground.get("log", []) or []:
+        log_entries.append(("playground", entry))
+    for entry in cluster.get("log", []) or []:
+        log_entries.append(("cluster", entry))
     if not log_entries:
-        return "No playground commands executed yet."
+        return "No playground or cluster commands executed yet."
     blocks = []
-    for entry in log_entries:
+    for source, entry in log_entries:
         blocks.append(
             "\n".join(
                 [
+                    f"[{source}]",
                     f"$ {entry.get('cmd')}",
                     f"Exit code: {entry.get('exit_code')}",
                     "Stdout:",

@@ -33,9 +33,7 @@ class StageState:
 
 DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
 LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
-MAX_TOOL_REQUESTS_PER_STAGE = 3
-MAX_CLUSTER_FIX_ITERS = 5
-MAX_OPS_FIX_ITERS = 2
+GIVE_UP_PHRASE = "we cannot complete the task"
 FIXED_PLAYGROUND_COMMANDS = {
     "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
     "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
@@ -166,6 +164,10 @@ def _parse_ops_failure(output: str) -> Optional[Dict[str, str]]:
     }
 
 
+def _agent_gave_up(output: str) -> bool:
+    return GIVE_UP_PHRASE in output.lower()
+
+
 def _run_playground_command(
     playground_name: str,
     cmd: List[str],
@@ -249,7 +251,7 @@ def run_demo_stream(
         "validation": {},
         "validation_history": [],
         "iteration": 0,
-        "max_iters": MAX_CLUSTER_FIX_ITERS,
+        "max_iters": None,
         "fix_actions": [],
         "log": cluster_log,
         "ready_for_removal": False,
@@ -473,7 +475,7 @@ def run_demo_stream(
             if long_run_mode and (use_playground or use_cluster):
                 tool_requests = _extract_tool_requests(result.output)
                 tool_entries: List[Dict[str, Any]] = []
-                for request in tool_requests[:MAX_TOOL_REQUESTS_PER_STAGE]:
+                for request in tool_requests:
                     tool_name = request.get("tool")
                     entry: Dict[str, Any]
                     if tool_name == "playground.exec" and use_playground:
@@ -601,6 +603,11 @@ def run_demo_stream(
                         )
                         stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
             trace["stages"][stage_name] = stage_trace
+            if _agent_gave_up(result.output):
+                trace["errors"].append(
+                    {"stage": stage_name, "error": f"Agent requested stop: {GIVE_UP_PHRASE}"}
+                )
+                failed = True
             _update_stage(
                 stages,
                 stage_name,
@@ -655,32 +662,23 @@ def run_demo_stream(
             ops_failure = _parse_ops_failure(outputs[stage_name].output)
             if ops_failure:
                 trace["ops_escalations"].append(ops_failure)
-                if ops_fix_count < MAX_OPS_FIX_ITERS:
-                    ops_fix_count += 1
-                    ops_escalation = "\n".join(
-                        filter(
-                            None,
-                            [
-                                f"Error: {ops_failure.get('error')}",
-                                f"Instruction: {ops_failure.get('instruction')}",
-                                f"Ops output:\n{ops_failure.get('raw')}",
-                            ],
-                        )
+                ops_fix_count += 1
+                ops_escalation = "\n".join(
+                    filter(
+                        None,
+                        [
+                            f"Error: {ops_failure.get('error')}",
+                            f"Instruction: {ops_failure.get('instruction')}",
+                            f"Ops output:\n{ops_failure.get('raw')}",
+                        ],
                     )
-                    retry_stages = ["planner", "coder", "reviewer", "ops"]
-                    if "aggregator" in stage_queue:
-                        insert_at = stage_queue.index("aggregator")
-                        stage_queue[insert_at:insert_at] = retry_stages
-                    else:
-                        stage_queue.extend(retry_stages)
+                )
+                retry_stages = ["planner", "coder", "reviewer", "ops"]
+                if "aggregator" in stage_queue:
+                    insert_at = stage_queue.index("aggregator")
+                    stage_queue[insert_at:insert_at] = retry_stages
                 else:
-                    trace["errors"].append(
-                        {
-                            "stage": "ops",
-                            "error": "Ops detected failure but max fix iterations reached.",
-                        }
-                    )
-                    failed = True
+                    stage_queue.extend(retry_stages)
 
         if failed:
             if use_playground:
@@ -717,14 +715,16 @@ def run_demo_stream(
         if long_run_mode:
             fix_iterations: List[Dict[str, Any]] = []
             last_validation: Dict[str, Any] = {}
-            for iteration in range(1, MAX_CLUSTER_FIX_ITERS + 1):
+            iteration = 0
+            while True:
+                iteration += 1
                 cluster_info["iteration"] = iteration
                 validation = cluster_manager.validate_cluster(run_id)
                 last_validation = validation
                 cluster_info["validation"] = validation
                 cluster_info["validation_history"].append({"iteration": iteration, "validation": validation})
                 entry = {
-                    "cmd": f"cluster.validate (iter {iteration}/{MAX_CLUSTER_FIX_ITERS})",
+                    "cmd": f"cluster.validate (iter {iteration})",
                     "exit_code": 0 if validation.get("ok") else 1,
                     "stdout": json.dumps(validation, indent=2),
                     "stderr": "" if validation.get("ok") else validation.get("error", ""),
@@ -761,10 +761,14 @@ def run_demo_stream(
                     extra_context=fixer_context,
                     system_messages=fixer_system_messages,
                 )
+                if _agent_gave_up(fixer_result.output):
+                    failed = True
+                    cluster_info["error"] = f"Agent requested stop: {GIVE_UP_PHRASE}"
+                    break
                 tool_requests = _extract_tool_requests(fixer_result.output)
                 tool_entries: List[Dict[str, Any]] = []
                 fix_actions: List[Dict[str, Any]] = []
-                for request in tool_requests[:MAX_TOOL_REQUESTS_PER_STAGE]:
+                for request in tool_requests:
                     tool_name = request.get("tool")
                     entry = {}
                     if tool_name == "playground.exec" and use_playground:
@@ -865,9 +869,9 @@ def run_demo_stream(
                     dml=dml_info,
                 )
             trace["cluster"]["fix_iterations"] = fix_iterations
-            if last_validation and not last_validation.get("ok"):
+            if last_validation and not last_validation.get("ok") and not failed:
                 failed = True
-                cluster_info["error"] = f"Validation failed after {MAX_CLUSTER_FIX_ITERS} iterations."
+                cluster_info["error"] = f"Validation failed after {iteration} iterations."
         else:
             validation = cluster_manager.validate_cluster(run_id)
             cluster_info["validation"] = validation
