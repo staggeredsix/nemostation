@@ -66,6 +66,7 @@ DEFAULT_GOAL_PRESETS = [
             "```json\n"
             "{\"tool\":\"cluster.exec\",\"container\":\"nemotron-play-<runid>-api\",\"cmd\":[\"bash\",\"-lc\",\"python -m api_service.main\"],\"timeout_s\":60}\n"
             "```\n"
+            "Use `cluster.logs` to inspect container logs on failures.\n"
             "Also run `cluster.validate` after starting services. Verify end-to-end:\n"
             "web -> api -> redis -> worker -> api -> web. Fix failures and rerun validation.\n"
             "At the end, print host URLs for API + Web, the exact validation commands, and any fixes applied.\n"

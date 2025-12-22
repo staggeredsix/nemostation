@@ -188,6 +188,7 @@ def run_demo_stream(
         "workspace_container": "",
     }
     cluster_log: List[Dict[str, Any]] = []
+    tool_context_chunks: List[str] = []
     cluster_info: Dict[str, Any] = {
         "enabled": bool(use_cluster),
         "run_id": run_id,
@@ -234,6 +235,8 @@ def run_demo_stream(
         )
         if cluster_status.get("log"):
             cluster_log.extend(cluster_status.get("log", []))
+            for entry in cluster_status.get("log", []):
+                tool_context_chunks.append(_format_cluster_context(entry))
 
     scenario_key = scenario or "general"
     if use_cluster:
@@ -291,7 +294,6 @@ def run_demo_stream(
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
-    tool_context_chunks: List[str] = []
     trace: Dict[str, Dict[str, Any]] = {
         "stages": {},
         "timings": {},
@@ -339,6 +341,8 @@ def run_demo_stream(
             f"- workspace_host: {cluster_info.get('workspace_host')}\n"
             f"- workspace_container: {cluster_info.get('workspace_container')}\n"
         )
+        if cluster_info.get("error"):
+            base_system_messages.append(f"CLUSTER_BOOTSTRAP_ERROR:\n{cluster_info.get('error')}\n")
 
     for stage_name in stage_order:
         _update_stage(stages, stage_name, status="running")
@@ -373,7 +377,8 @@ def run_demo_stream(
                 )
             if long_run_mode and use_cluster and stage_name == "coder":
                 system_messages.append(
-                    "Cluster tools are available: use cluster.exec for container commands and cluster.validate for validation."
+                    "Cluster tools are available: use cluster.exec for container commands, cluster.logs for log collection, "
+                    "and cluster.validate for validation."
                 )
             result = call_agent(
                 stage_name,
@@ -460,6 +465,25 @@ def run_demo_stream(
                             "stdout": json.dumps(validation, indent=2),
                             "stderr": "" if validation.get("ok") else validation.get("error", ""),
                         }
+                        tool_context_chunks.append(_format_cluster_context(entry))
+                        cluster_log.append(entry)
+                    elif tool_name == "cluster.logs" and use_cluster:
+                        container = request.get("container")
+                        if not isinstance(container, str):
+                            entry = {
+                                "cmd": f"{container} logs",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid cluster.logs payload. Expected container string.",
+                            }
+                        else:
+                            tail_value = request.get("tail", 200)
+                            try:
+                                tail = int(tail_value)
+                            except (TypeError, ValueError):
+                                tail = 200
+                            entry = cluster_manager.container_logs(container, tail=tail)
+                            entry["cmd"] = f"{container} :: logs (tail={tail})"
                         tool_context_chunks.append(_format_cluster_context(entry))
                         cluster_log.append(entry)
                     else:
