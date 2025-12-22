@@ -34,6 +34,7 @@ class StageState:
 DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
 LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
 MAX_TOOL_REQUESTS_PER_STAGE = 3
+MAX_CLUSTER_FIX_ITERS = 5
 FIXED_PLAYGROUND_COMMANDS = {
     "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
     "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
@@ -127,6 +128,25 @@ def _format_cluster_context(entry: Dict[str, Any]) -> str:
     )
 
 
+def _format_validation_context(validation: Dict[str, Any], cluster_info: Dict[str, Any]) -> str:
+    containers = ", ".join([c.get("name", "") for c in cluster_info.get("containers", [])]) or "none"
+    status_lines = [
+        f"run_id: {cluster_info.get('run_id')}",
+        f"network: {cluster_info.get('network')}",
+        f"containers: {containers}",
+        f"api_port: {cluster_info.get('api_port')}",
+        f"web_port: {cluster_info.get('web_port')}",
+        f"workspace_host: {cluster_info.get('workspace_host')}",
+        f"workspace_container: {cluster_info.get('workspace_container')}",
+    ]
+    return (
+        "Cluster validation report:\n"
+        f"{json.dumps(validation, indent=2)}\n\n"
+        "Cluster status:\n"
+        + "\n".join(status_lines)
+    )
+
+
 def _run_playground_command(
     playground_name: str,
     cmd: List[str],
@@ -207,6 +227,10 @@ def run_demo_stream(
         "workspace_container": "",
         "error": None,
         "validation": {},
+        "validation_history": [],
+        "iteration": 0,
+        "max_iters": MAX_CLUSTER_FIX_ITERS,
+        "fix_actions": [],
         "log": cluster_log,
         "ready_for_removal": False,
     }
@@ -244,6 +268,7 @@ def run_demo_stream(
         if cluster_status.get("reused"):
             validation = cluster_manager.validate_cluster(run_id)
             cluster_info["validation"] = validation
+            cluster_info["validation_history"].append({"iteration": 0, "validation": validation})
             entry = {
                 "cmd": "cluster.validate (reuse)",
                 "exit_code": 0 if validation.get("ok") else 1,
@@ -501,6 +526,16 @@ def run_demo_stream(
                             entry["cmd"] = f"{container} :: logs (tail={tail})"
                         tool_context_chunks.append(_format_cluster_context(entry))
                         cluster_log.append(entry)
+                    elif tool_name == "cluster.validate" and use_cluster:
+                        validation = cluster_manager.validate_cluster(run_id)
+                        entry = {
+                            "cmd": "cluster.validate (fixer)",
+                            "exit_code": 0 if validation.get("ok") else 1,
+                            "stdout": json.dumps(validation, indent=2),
+                            "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                        }
+                        tool_context_chunks.append(_format_cluster_context(entry))
+                        cluster_log.append(entry)
                     else:
                         continue
                     tool_entries.append(entry)
@@ -620,19 +655,176 @@ def run_demo_stream(
     if playground_log:
         trace["playground"]["log"] = playground_log
     if use_cluster:
-        validation = cluster_manager.validate_cluster(run_id)
-        cluster_info["validation"] = validation
-        cluster_log.append(
-            {
-                "cmd": "cluster.validate (auto)",
-                "exit_code": 0 if validation.get("ok") else 1,
-                "stdout": json.dumps(validation, indent=2),
-                "stderr": "" if validation.get("ok") else validation.get("error", ""),
-            }
-        )
-        trace["cluster"]["validation"] = validation
-        if cluster_log:
-            trace["cluster"]["log"] = cluster_log
+        if long_run_mode:
+            fix_iterations: List[Dict[str, Any]] = []
+            last_validation: Dict[str, Any] = {}
+            for iteration in range(1, MAX_CLUSTER_FIX_ITERS + 1):
+                cluster_info["iteration"] = iteration
+                validation = cluster_manager.validate_cluster(run_id)
+                last_validation = validation
+                cluster_info["validation"] = validation
+                cluster_info["validation_history"].append({"iteration": iteration, "validation": validation})
+                entry = {
+                    "cmd": f"cluster.validate (iter {iteration}/{MAX_CLUSTER_FIX_ITERS})",
+                    "exit_code": 0 if validation.get("ok") else 1,
+                    "stdout": json.dumps(validation, indent=2),
+                    "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                }
+                cluster_log.append(entry)
+                tool_context_chunks.append(_format_cluster_context(entry))
+                trace["cluster"]["validation"] = validation
+                trace["cluster"]["validation_history"] = cluster_info["validation_history"]
+                if cluster_log:
+                    trace["cluster"]["log"] = cluster_log
+                total_ms = (time.perf_counter() - start_time) * 1000
+                yield _serialize(
+                    stages,
+                    goal,
+                    scenario,
+                    final=final_text,
+                    total_ms=total_ms,
+                    playground=playground_info,
+                    cluster=cluster_info,
+                    dml=dml_info,
+                )
+                if validation.get("ok"):
+                    break
+                fixer_context = _format_validation_context(validation, cluster_info)
+                fixer_system_messages = list(base_system_messages)
+                fixer_system_messages.append(
+                    "Cluster tools are available: use cluster.exec for container commands and cluster.logs for logs."
+                )
+                fixer_result = call_agent(
+                    "fixer",
+                    goal,
+                    scenario,
+                    max_tokens=384,
+                    extra_context=fixer_context,
+                    system_messages=fixer_system_messages,
+                )
+                tool_requests = _extract_tool_requests(fixer_result.output)
+                tool_entries: List[Dict[str, Any]] = []
+                fix_actions: List[Dict[str, Any]] = []
+                for request in tool_requests[:MAX_TOOL_REQUESTS_PER_STAGE]:
+                    tool_name = request.get("tool")
+                    entry = {}
+                    if tool_name == "playground.exec" and use_playground:
+                        cmd = request.get("cmd")
+                        timeout_s = int(request.get("timeout_s", 60))
+                        if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+                            entry = {
+                                "cmd": str(cmd),
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid command format. Expected list[str].",
+                            }
+                        else:
+                            entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
+                            entry["cmd"] = " ".join(cmd)
+                        tool_context_chunks.append(_format_tool_context(entry))
+                        playground_log.append(entry)
+                    elif tool_name == "playground.write_file" and use_playground:
+                        path = request.get("path")
+                        content = request.get("content")
+                        if not isinstance(path, str) or not isinstance(content, str):
+                            entry = {
+                                "cmd": f"write_file {path}",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid write_file payload. Expected path/content strings.",
+                            }
+                        else:
+                            entry = playground_manager.write_file(playground_name, path, content)
+                            entry["cmd"] = f"write_file {path}"
+                        tool_context_chunks.append(_format_tool_context(entry))
+                        playground_log.append(entry)
+                    elif tool_name == "cluster.exec" and use_cluster:
+                        container = request.get("container")
+                        cmd = request.get("cmd")
+                        timeout_s = int(request.get("timeout_s", 60))
+                        if not isinstance(container, str) or not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+                            entry = {
+                                "cmd": f"{container} {cmd}",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid cluster.exec payload. Expected container + cmd list.",
+                            }
+                        else:
+                            entry = cluster_manager.exec_in(container, cmd, timeout_s=timeout_s)
+                            entry["cmd"] = f"{container} :: {' '.join(cmd)}"
+                        tool_context_chunks.append(_format_cluster_context(entry))
+                        cluster_log.append(entry)
+                    elif tool_name == "cluster.logs" and use_cluster:
+                        container = request.get("container")
+                        if not isinstance(container, str):
+                            entry = {
+                                "cmd": f"{container} logs",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid cluster.logs payload. Expected container string.",
+                            }
+                        else:
+                            tail_value = request.get("tail", 200)
+                            try:
+                                tail = int(tail_value)
+                            except (TypeError, ValueError):
+                                tail = 200
+                            entry = cluster_manager.container_logs(container, tail=tail)
+                            entry["cmd"] = f"{container} :: logs (tail={tail})"
+                        tool_context_chunks.append(_format_cluster_context(entry))
+                        cluster_log.append(entry)
+                    else:
+                        continue
+                    tool_entries.append(entry)
+                    fix_actions.append(
+                        {
+                            "iteration": iteration,
+                            "action": entry.get("cmd", ""),
+                            "exit_code": entry.get("exit_code"),
+                        }
+                    )
+                if tool_entries:
+                    fix_iterations.append(
+                        {
+                            "iteration": iteration,
+                            "validation": validation,
+                            "fixer_output": fixer_result.output,
+                            "tool_requests": tool_entries,
+                        }
+                    )
+                if fix_actions:
+                    cluster_info["fix_actions"].extend(fix_actions)
+                total_ms = (time.perf_counter() - start_time) * 1000
+                yield _serialize(
+                    stages,
+                    goal,
+                    scenario,
+                    final=final_text,
+                    total_ms=total_ms,
+                    playground=playground_info,
+                    cluster=cluster_info,
+                    dml=dml_info,
+                )
+            trace["cluster"]["fix_iterations"] = fix_iterations
+            if last_validation and not last_validation.get("ok"):
+                failed = True
+                cluster_info["error"] = f"Validation failed after {MAX_CLUSTER_FIX_ITERS} iterations."
+        else:
+            validation = cluster_manager.validate_cluster(run_id)
+            cluster_info["validation"] = validation
+            cluster_info["validation_history"].append({"iteration": 1, "validation": validation})
+            cluster_log.append(
+                {
+                    "cmd": "cluster.validate (auto)",
+                    "exit_code": 0 if validation.get("ok") else 1,
+                    "stdout": json.dumps(validation, indent=2),
+                    "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                }
+            )
+            trace["cluster"]["validation"] = validation
+            trace["cluster"]["validation_history"] = cluster_info["validation_history"]
+            if cluster_log:
+                trace["cluster"]["log"] = cluster_log
     if use_dml and dml_enabled:
         run_report = {
             "scenario_key": scenario_key,

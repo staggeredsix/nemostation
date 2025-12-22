@@ -91,3 +91,4 @@ services:
     image: nemotron-playground:latest
     profiles:
       - playground
+      - cluster
