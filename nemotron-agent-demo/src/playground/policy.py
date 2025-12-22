@@ -14,6 +14,7 @@ ALLOWLIST = {
     "python",
     "pytest",
     "pip",
+    "pip3",
     "uvicorn",
     "node",
     "npm",
