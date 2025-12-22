@@ -114,6 +114,14 @@ class GPTRunner:
         return str(outputs)
 
     def summarize(self, text: str, max_len: int = 128) -> str:
+        max_input_chars = _read_summary_max_input_chars()
+        if len(text) > max_input_chars:
+            LOGGER.warning(
+                "Truncating summary input from %d to %d characters to fit model limits.",
+                len(text),
+                max_input_chars,
+            )
+            text = text[:max_input_chars]
         if isinstance(self._backend, _DummyBackend):
             return self._backend.summarize(text, max_len=max_len)
         if isinstance(self._backend, _OpenAIClientBackend):
@@ -300,6 +308,17 @@ class _OpenAICompatibleBackend:
 
 def _read_summary_max_tokens(*, default: int) -> int:
     raw = os.getenv("DML_SUMMARY_MAX_TOKENS")
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _read_summary_max_input_chars(*, default: int = 8000) -> int:
+    raw = os.getenv("DML_SUMMARY_MAX_INPUT_CHARS")
     if not raw:
         return default
     try:
