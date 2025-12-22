@@ -11,6 +11,7 @@ top_k: 6
 dml_top_k: 8
 similarity_threshold: 0.32
 token_budget: 600
+aging_interval_seconds: 86400
 model_name: mistralai/Mistral-7B-Instruct-v0.2
 embedding_model: sentence-transformers/all-MiniLM-L6-v2
 embedding_device: null

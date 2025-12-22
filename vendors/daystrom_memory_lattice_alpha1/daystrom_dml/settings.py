@@ -106,6 +106,7 @@ class DMLSettings(BaseModel):
     similarity_threshold: float = Field(0.32, ge=-1.0, le=1.0)
     literal_context: int = Field(1, ge=0)
     token_budget: int = Field(600, ge=1)
+    aging_interval_seconds: int = Field(86400, ge=1)
     model_name: str = "mistralai/Mistral-7B-Instruct-v0.2"
     embedding_model: str | None = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_device: str | None = None
