@@ -80,6 +80,7 @@ class MemoryStore:
         K: int,
         capacity: int,
         start_aging_loop: bool = True,
+        aging_interval_seconds: float = 5.0,
         enable_quality_on_retrieval: bool = False,
         similarity_threshold: float = 0.0,
     ) -> None:
@@ -100,6 +101,7 @@ class MemoryStore:
         self._lineage: Dict[int, MemoryItem] = {}
         self._repair_queue: List[int] = []
         self.quality_threshold = -0.1
+        self._aging_interval_seconds = max(1.0, float(aging_interval_seconds))
         self.similarity_threshold = float(max(-1.0, min(1.0, similarity_threshold)))
         # Expensive quality/repair checks can be deferred to a maintenance pass.
         self.enable_quality_on_retrieval = bool(enable_quality_on_retrieval)
@@ -449,7 +451,7 @@ class MemoryStore:
             with self._lock:
                 self._apply_decay()
                 self._abstract_low_fidelity()
-            self._stop_event.wait(5.0)
+            self._stop_event.wait(self._aging_interval_seconds)
 
     def _apply_decay(self, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
@@ -691,4 +693,3 @@ class MemoryStore:
                 if random.random() > ratio:
                     continue
                 self._assess_quality(item, item.embedding, now)
-

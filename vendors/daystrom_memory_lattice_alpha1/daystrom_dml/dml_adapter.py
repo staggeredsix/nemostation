@@ -177,6 +177,7 @@ class DMLAdapter:
             K=int(self.config["K"]),
             capacity=int(self.config["capacity"]),
             start_aging_loop=start_aging_loop,
+            aging_interval_seconds=float(self.config.get("aging_interval_seconds", 86400)),
             enable_quality_on_retrieval=self.enable_quality_on_retrieval,
             similarity_threshold=float(self.config.get("similarity_threshold", 0.0)),
         )
@@ -1336,4 +1337,3 @@ class DMLAdapter:
             self.close()
         except Exception:
             pass
-
