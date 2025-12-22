@@ -161,6 +161,7 @@ def run_demo_stream(
     use_cluster: bool = False,
     cluster_image: str = "nemotron-playground:latest",
     cluster_size: int = 3,
+    cluster_run_id: Optional[str] = None,
 ) -> Generator[Dict, None, None]:
     stages: List[StageState] = []
     stage_order = ["planner", "coder", "reviewer"]
@@ -169,7 +170,10 @@ def run_demo_stream(
     stage_order.append("aggregator")
     stages = [StageState(name=s.title()) for s in stage_order]
 
-    run_id = str(uuid.uuid4())
+    if use_cluster and isinstance(cluster_run_id, str) and cluster_run_id.strip() and "/" not in cluster_run_id and " " not in cluster_run_id:
+        run_id = cluster_run_id.strip()
+    else:
+        run_id = str(uuid.uuid4())
     long_run_mode = _is_long_run(goal, scenario)
     playground_name = f"nemotron-playground-{run_id.split('-')[0]}"
     playground_log: List[Dict[str, Any]] = []
@@ -237,6 +241,17 @@ def run_demo_stream(
             cluster_log.extend(cluster_status.get("log", []))
             for entry in cluster_status.get("log", []):
                 tool_context_chunks.append(_format_cluster_context(entry))
+        if cluster_status.get("reused"):
+            validation = cluster_manager.validate_cluster(run_id)
+            cluster_info["validation"] = validation
+            entry = {
+                "cmd": "cluster.validate (reuse)",
+                "exit_code": 0 if validation.get("ok") else 1,
+                "stdout": json.dumps(validation, indent=2),
+                "stderr": "" if validation.get("ok") else validation.get("error", ""),
+            }
+            tool_context_chunks.append(_format_cluster_context(entry))
+            cluster_log.append(entry)
 
     scenario_key = scenario or "general"
     if use_cluster:
@@ -689,6 +704,7 @@ def run_demo(
     use_cluster: bool = False,
     cluster_image: str = "nemotron-playground:latest",
     cluster_size: int = 3,
+    cluster_run_id: Optional[str] = None,
 ) -> Dict:
     last_state = {}
     for state in run_demo_stream(
@@ -703,6 +719,7 @@ def run_demo(
         use_cluster=use_cluster,
         cluster_image=cluster_image,
         cluster_size=cluster_size,
+        cluster_run_id=cluster_run_id,
     ):
         last_state = deepcopy(state)
     return last_state

@@ -363,6 +363,7 @@ def stream_runner(
     use_cluster: bool,
     cluster_image: str,
     cluster_size: int,
+    cluster_run_id: str,
 ):
     if not ping_server():
         raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
@@ -379,6 +380,7 @@ def stream_runner(
         use_cluster=use_cluster,
         cluster_image=cluster_image,
         cluster_size=cluster_size,
+        cluster_run_id=cluster_run_id or None,
     ):
         metrics_html = render_metrics(state)
         timeline_html = render_progress(state["stages"]) + render_dml_stream(state.get("dml", {})) + render_timeline(state)
@@ -787,6 +789,7 @@ def build_ui() -> gr.Blocks:
                 use_cluster,
                 cluster_image,
                 cluster_size,
+                cluster_run_id_state,
             ],
             outputs=[
                 metrics_card,
