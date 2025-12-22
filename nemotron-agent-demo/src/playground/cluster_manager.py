@@ -139,6 +139,25 @@ def _build_worker_names(prefix: str, count: int) -> List[str]:
     return names
 
 
+def _list_cluster_containers(prefix: str) -> List[str]:
+    result = _run_docker(["ps", "-a", "--format", "{{.Names}}", "--filter", f"name=^{prefix}"])
+    if result is None or result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _container_role(name: str, prefix: str) -> Optional[str]:
+    if name == f"{prefix}redis":
+        return "redis"
+    if name == f"{prefix}api":
+        return "api"
+    if name == f"{prefix}web":
+        return "web"
+    if name.startswith(f"{prefix}worker"):
+        return "worker"
+    return None
+
+
 def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[str]) -> Dict[str, Any]:
     error = _validate_run_id(run_id)
     if error:
@@ -167,8 +186,41 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
         container_defs.append(("web", f"{prefix}web", image))
 
     network_check = _run_docker(["network", "inspect", network])
-    if network_check and network_check.returncode == 0:
-        return {"ok": False, "status": "error", "error": f"Network {network} already exists."}
+    existing_containers = _list_cluster_containers(prefix)
+    if network_check and network_check.returncode == 0 and existing_containers:
+        containers = []
+        has_web = False
+        for name in existing_containers:
+            role = _container_role(name, prefix)
+            if role:
+                containers.append({"role": role, "name": name})
+                if role == "web":
+                    has_web = True
+        return {
+            "ok": True,
+            "status": "running",
+            "network": network,
+            "containers": containers,
+            "api_port": api_port,
+            "web_port": web_port if has_web else None,
+            "workspace_host": str(workspace_root),
+            "workspace_container": policy.WORKSPACE_ROOT,
+            "log": [],
+            "error": None,
+            "reused": True,
+        }
+    if network_check and network_check.returncode == 0 and not existing_containers:
+        return {
+            "ok": False,
+            "status": "error",
+            "error": f"Network {network} already exists without containers.",
+        }
+    if existing_containers and not (network_check and network_check.returncode == 0):
+        return {
+            "ok": False,
+            "status": "error",
+            "error": f"Cluster containers already exist without network {network}.",
+        }
     for _, name, _ in container_defs:
         if _inspect_exists(name):
             return {"ok": False, "status": "error", "error": f"Container {name} already exists."}
@@ -246,6 +298,7 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
         "workspace_container": policy.WORKSPACE_ROOT,
         "log": log,
         "error": None,
+        "reused": False,
     }
 
 
