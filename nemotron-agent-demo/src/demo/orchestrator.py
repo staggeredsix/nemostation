@@ -35,6 +35,7 @@ DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
 LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
 MAX_TOOL_REQUESTS_PER_STAGE = 3
 MAX_CLUSTER_FIX_ITERS = 5
+MAX_OPS_FIX_ITERS = 2
 FIXED_PLAYGROUND_COMMANDS = {
     "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
     "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
@@ -147,6 +148,24 @@ def _format_validation_context(validation: Dict[str, Any], cluster_info: Dict[st
     )
 
 
+def _parse_ops_failure(output: str) -> Optional[Dict[str, str]]:
+    sections: Dict[str, str] = {}
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().upper()
+        if key in {"OPS_STATUS", "OPS_ERROR", "OPS_TO_PLANNER"}:
+            sections[key] = value.strip()
+    if sections.get("OPS_STATUS", "").upper() != "FAIL":
+        return None
+    return {
+        "error": sections.get("OPS_ERROR", "").strip(),
+        "instruction": sections.get("OPS_TO_PLANNER", "").strip(),
+        "raw": output.strip(),
+    }
+
+
 def _run_playground_command(
     playground_name: str,
     cmd: List[str],
@@ -188,6 +207,7 @@ def run_demo_stream(
     if not fast:
         stage_order.append("ops")
     stage_order.append("aggregator")
+    stage_queue = list(stage_order)
     stages = [StageState(name=s.title()) for s in stage_order]
 
     if use_cluster and isinstance(cluster_run_id, str) and cluster_run_id.strip() and "/" not in cluster_run_id and " " not in cluster_run_id:
@@ -334,10 +354,13 @@ def run_demo_stream(
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
+    ops_escalation: Optional[str] = None
+    ops_fix_count = 0
     trace: Dict[str, Dict[str, Any]] = {
         "stages": {},
         "timings": {},
         "errors": [],
+        "ops_escalations": [],
         "dml": {
             "cookbook_found": cookbook_info["found"],
             "cookbook_sources": cookbook_info["sources"],
@@ -384,7 +407,8 @@ def run_demo_stream(
         if cluster_info.get("error"):
             base_system_messages.append(f"CLUSTER_BOOTSTRAP_ERROR:\n{cluster_info.get('error')}\n")
 
-    for stage_name in stage_order:
+    while stage_queue:
+        stage_name = stage_queue.pop(0)
         _update_stage(stages, stage_name, status="running")
         yield _serialize(
             stages,
@@ -400,7 +424,9 @@ def run_demo_stream(
         stage_start = time.perf_counter()
         try:
             extra_context = ""
-            if stage_name != "planner":
+            if stage_name == "planner" and ops_escalation:
+                extra_context = f"Ops escalation:\n{ops_escalation}"
+            elif stage_name != "planner":
                 context_parts = [f"{k.title()} Output:\n{v.output}" for k, v in outputs.items()]
                 extra_context = "\n\n".join(context_parts)
             if tool_context_chunks:
@@ -585,6 +611,8 @@ def run_demo_stream(
                 tokens=metrics.tokens,
                 output=result.output,
             )
+            if stage_name == "planner" and ops_escalation:
+                ops_escalation = None
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = (time.perf_counter() - stage_start) * 1000
             trace["stages"][stage_name] = {
@@ -622,6 +650,37 @@ def run_demo_stream(
             cluster=cluster_info,
             dml=dml_info,
         )
+
+        if not failed and stage_name == "ops" and stage_name in outputs:
+            ops_failure = _parse_ops_failure(outputs[stage_name].output)
+            if ops_failure:
+                trace["ops_escalations"].append(ops_failure)
+                if ops_fix_count < MAX_OPS_FIX_ITERS:
+                    ops_fix_count += 1
+                    ops_escalation = "\n".join(
+                        filter(
+                            None,
+                            [
+                                f"Error: {ops_failure.get('error')}",
+                                f"Instruction: {ops_failure.get('instruction')}",
+                                f"Ops output:\n{ops_failure.get('raw')}",
+                            ],
+                        )
+                    )
+                    retry_stages = ["planner", "coder", "reviewer", "ops"]
+                    if "aggregator" in stage_queue:
+                        insert_at = stage_queue.index("aggregator")
+                        stage_queue[insert_at:insert_at] = retry_stages
+                    else:
+                        stage_queue.extend(retry_stages)
+                else:
+                    trace["errors"].append(
+                        {
+                            "stage": "ops",
+                            "error": "Ops detected failure but max fix iterations reached.",
+                        }
+                    )
+                    failed = True
 
         if failed:
             if use_playground:
