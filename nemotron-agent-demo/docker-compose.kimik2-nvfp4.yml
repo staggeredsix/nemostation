@@ -1,0 +1,97 @@
+services:
+  kimi-vllm:
+    build: ./server/kimi_vllm
+    container_name: kimi-vllm
+    ports:
+      - "8000:8000"
+    gpus: all
+    ipc: host
+    shm_size: "8gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - /mnt/raid/kimik2:/mnt/raid/kimik2
+    environment:
+      HF_HOME: /mnt/raid/kimik2/hf
+      HUGGINGFACE_HUB_CACHE: /mnt/raid/kimik2/hf
+      VLLM_CACHE_ROOT: /mnt/raid/kimik2/vllm
+      TMPDIR: /mnt/raid/kimik2/tmp
+      KIMI_MODEL_PATH: /mnt/raid/kimik2/hf/Kimi-K2-Thinking-NVFP4
+      VLLM_MAX_MODEL_LEN: 2048
+      VLLM_MAX_NUM_SEQS: 1
+      VLLM_GPU_MEMORY_UTILIZATION: 0.90
+      VLLM_KV_CACHE_DTYPE: fp8
+      VLLM_MAX_NUM_BATCHED_TOKENS: 2048
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  nemotron-ui:
+    build:
+      context: ..
+      dockerfile: nemotron-agent-demo/Dockerfile.ui
+    container_name: nemotron-ui
+    restart: unless-stopped
+    environment:
+      OPENAI_BASE_URL: http://kimi-vllm:8000/v1
+      GRADIO_SERVER_NAME: 0.0.0.0
+      GRADIO_SERVER_PORT: 7860
+      DML_BASE_URL: http://dml-service:9001
+      DOCKER_HOST: unix:///var/run/docker.sock
+      PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
+    group_add:
+      - "987"
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./prompt_library:/app/prompt_library
+      - ./context:/app/context:ro
+      - ./prompts:/app/prompts:ro
+      - ../vendors:/app/nemostation/vendors:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      kimi-vllm:
+        condition: service_healthy
+      dml-service:
+        condition: service_healthy
+
+  dml-service:
+    build:
+      context: ..
+      dockerfile: nemotron-agent-demo/server/dml_service/Dockerfile
+    container_name: dml-service
+    restart: unless-stopped
+    environment:
+      DML_STORAGE_DIR: /data/dml
+      DML_LLM_BACKEND: openai
+      DML_OPENAI_BASE_URL: http://kimi-vllm:8000/v1
+      DML_OPENAI_API_KEY: "null"
+      DML_OPENAI_MODEL: kimi-k2-nvfp4
+      DML_SUMMARY_MAX_TOKENS: 256
+      DML_SUMMARY_TEMPERATURE: 0.2
+      DML_SUMMARY_TOP_P: 0.95
+      DML_SUMMARY_ENABLE_THINKING: "false"
+      PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
+    volumes:
+      - ./data/dml:/data/dml
+    depends_on:
+      kimi-vllm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9001/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  nemotron-playground-image:
+    build:
+      context: ..
+      dockerfile: nemotron-agent-demo/playground/Dockerfile
+    image: nemotron-playground:latest
+    profiles:
+      - playground
+      - cluster
