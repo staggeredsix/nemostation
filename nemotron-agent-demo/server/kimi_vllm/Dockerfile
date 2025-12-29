@@ -14,6 +14,10 @@ RUN WHEEL=/tmp/vllm-0.13.0+cu130-cp38-abi3-manylinux_2_35_aarch64.whl \
     && python -m pip install --no-cache-dir --no-deps "$WHEEL" \
     && python -c "import vllm; print('vLLM version:', vllm.__version__)"
 
+RUN python -m pip install --no-cache-dir model-hosting-container-standards
+
+RUN python -c "import model_hosting_container_standards.sagemaker; print('mhcs ok')"
+
 RUN python - <<'PY'
 import os
 import torch
