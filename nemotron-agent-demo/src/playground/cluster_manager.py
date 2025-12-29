@@ -139,6 +139,36 @@ def _build_worker_names(prefix: str, count: int) -> List[str]:
     return names
 
 
+def _role_start_command(role: str) -> List[str]:
+    if role == "api":
+        launch = (
+            "if [ -f /workspace/api_service/main.py ]; then "
+            "python -m api_service.main; "
+            "elif [ -f /workspace/api_service/app.py ]; then "
+            "python -m api_service.app; "
+            "else echo 'api_service entrypoint not found.' >&2; exit 1; fi"
+        )
+    elif role == "worker":
+        launch = (
+            "if [ -f /workspace/worker_service/main.py ]; then "
+            "python -m worker_service.main; "
+            "elif [ -f /workspace/worker_service/app.py ]; then "
+            "python -m worker_service.app; "
+            "else echo 'worker_service entrypoint not found.' >&2; exit 1; fi"
+        )
+    elif role == "web":
+        launch = (
+            "if [ -f /workspace/webui/app.py ]; then "
+            "python -m webui.app; "
+            "elif [ -f /workspace/webui/main.py ]; then "
+            "python -m webui.main; "
+            "else echo 'webui entrypoint not found.' >&2; exit 1; fi"
+        )
+    else:
+        raise ValueError(f"Unsupported role: {role}")
+    return ["bash", "-lc", launch]
+
+
 def _list_cluster_containers(prefix: str) -> List[str]:
     result = _run_docker(["ps", "-a", "--format", "{{.Names}}", "--filter", f"name=^{prefix}"])
     if result is None or result.returncode != 0:
@@ -275,7 +305,7 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
             cmd += ["-p", f"{web_port}:{DEFAULT_WEB_INTERNAL_PORT}"]
         cmd.append(image_name)
         if role != "redis":
-            cmd += ["sleep", "infinity"]
+            cmd += _role_start_command(role)
         result = _run_docker(cmd, timeout_s=60)
         log.append(_format_log_entry(cmd, result))
         if result is None or result.returncode != 0:
