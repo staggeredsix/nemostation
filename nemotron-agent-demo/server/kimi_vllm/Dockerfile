@@ -1,17 +1,25 @@
 FROM nvcr.io/nvidia/vllm:25.11-py3
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        build-essential \
+        ninja-build \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --no-cache-dir --upgrade pip
 
-RUN WHEEL=/tmp/vllm-0.13.0+cu130-cp38-abi3-manylinux_2_35_aarch64.whl \
-    && curl -fL https://github.com/vllm-project/vllm/releases/download/v0.13.0/vllm-0.13.0+cu130-cp38-abi3-manylinux_2_35_aarch64.whl -o "$WHEEL" \
-    && python -m pip uninstall -y vllm || true
+RUN python -m pip uninstall -y vllm || true
 
-RUN WHEEL=/tmp/vllm-0.13.0+cu130-cp38-abi3-manylinux_2_35_aarch64.whl \
-    && python -m pip install --no-cache-dir --no-deps "$WHEEL" \
+RUN git clone https://github.com/vllm-project/vllm.git /opt/vllm-src \
+    && cd /opt/vllm-src \
+    && git checkout v0.13.0 \
+    && python -m pip install -U pip setuptools wheel packaging \
+    && python -m pip install -e . \
     && python -c "import vllm; print('vLLM version:', vllm.__version__)"
 
 RUN python -m pip install --no-cache-dir model-hosting-container-standards
