@@ -23,6 +23,7 @@ services:
       VLLM_GPU_MEMORY_UTILIZATION: 0.90
       VLLM_KV_CACHE_DTYPE: fp8
       VLLM_MAX_NUM_BATCHED_TOKENS: 2048
+      VLLM_CPU_OFFLOAD_GB: 360
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null"]
       interval: 10s
