@@ -1,35 +1,4 @@
 services:
-  kimi-vllm:
-    build: ./server/kimi_vllm
-    container_name: kimi-vllm
-    ports:
-      - "8000:8000"
-    gpus: all
-    ipc: host
-    shm_size: "8gb"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    volumes:
-      - /mnt/raid/kimik2:/mnt/raid/kimik2
-    environment:
-      HF_HOME: /mnt/raid/kimik2/hf
-      HUGGINGFACE_HUB_CACHE: /mnt/raid/kimik2/hf
-      VLLM_CACHE_ROOT: /mnt/raid/kimik2/vllm
-      TMPDIR: /mnt/raid/kimik2/tmp
-      KIMI_MODEL_PATH: /mnt/raid/kimik2/hf/Kimi-K2-Thinking-NVFP4
-      VLLM_MAX_MODEL_LEN: 2048
-      VLLM_MAX_NUM_SEQS: 1
-      VLLM_GPU_MEMORY_UTILIZATION: 0.90
-      VLLM_KV_CACHE_DTYPE: fp8
-      VLLM_MAX_NUM_BATCHED_TOKENS: 2048
-      VLLM_CPU_OFFLOAD_GB: 360
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-
   nemotron-ui:
     build:
       context: ..
@@ -37,7 +6,7 @@ services:
     container_name: nemotron-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://kimi-vllm:8000/v1
+      OPENAI_BASE_URL: http://host.docker.internal:8000/v1
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
       DML_BASE_URL: http://dml-service:9001
@@ -47,6 +16,8 @@ services:
       - "987"
     ports:
       - "7860:7860"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./prompt_library:/app/prompt_library
       - ./context:/app/context:ro
@@ -54,8 +25,6 @@ services:
       - ../vendors:/app/nemostation/vendors:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      kimi-vllm:
-        condition: service_healthy
       dml-service:
         condition: service_healthy
 
@@ -68,7 +37,7 @@ services:
     environment:
       DML_STORAGE_DIR: /data/dml
       DML_LLM_BACKEND: openai
-      DML_OPENAI_BASE_URL: http://kimi-vllm:8000/v1
+      DML_OPENAI_BASE_URL: http://host.docker.internal:8000/v1
       DML_OPENAI_API_KEY: "null"
       DML_OPENAI_MODEL: kimi-k2-nvfp4
       DML_SUMMARY_MAX_TOKENS: 256
@@ -78,9 +47,8 @@ services:
       PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
     volumes:
       - ./data/dml:/data/dml
-    depends_on:
-      kimi-vllm:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9001/health >/dev/null || exit 1"]
       interval: 10s

@@ -48,7 +48,12 @@ docker compose up -d --force-recreate nemotron-ui
 docker exec nemotron-ui docker ps
 ```
 
-### Kimi-K2 NVFP4 (vLLM)
+### Kimi-K2 NVFP4 via host vLLM (recommended for GB300 / Grace)
+Start the host vLLM server in one terminal:
+```bash
+./run_kimi_vllm_host.sh
+```
+Then launch the UI + DML services:
 ```bash
 docker compose -f docker-compose.kimik2-nvfp4.yml up --build
 ```
