@@ -49,11 +49,11 @@ docker exec nemotron-ui docker ps
 ```
 
 ### Kimi-K2 NVFP4 via host vLLM (recommended for GB300 / Grace)
-Start the host vLLM server in one terminal:
+Terminal 1:
 ```bash
 ./run_kimi_vllm_host.sh
 ```
-Then launch the UI + DML services:
+Terminal 2:
 ```bash
 docker compose -f docker-compose.kimik2-nvfp4.yml up --build
 ```
@@ -62,7 +62,7 @@ Verify services:
 curl http://localhost:8000/v1/models
 curl http://localhost:9001/health
 ```
-Note: the model must already exist at `/mnt/raid/kimik2/hf/Kimi-K2-Thinking-NVFP4`.
+Note: the model must already exist at `/mnt/raid/kimik2/hf/hub/models--nvidia--Kimi-K2-Thinking-NVFP4`.
 
 ### Build the playground image
 The playground container image is a local-only dev image used by the UI when running command tools. Build it once:
