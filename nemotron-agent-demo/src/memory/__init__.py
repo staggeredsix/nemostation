@@ -1,1 +1,1 @@
-"""Memory layer integrations for the Autonomous Agents Stress Testing demo."""
+"""Memory layer integrations for the Nemotron demo."""

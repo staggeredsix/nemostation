@@ -64,7 +64,7 @@ DEFAULT_GOAL_PRESETS = [
             "Use Redis for queue + status. Use env vars REDIS_URL and API_URL.\n"
             "If cluster tools are enabled, use JSON tool requests for:\n"
             "```json\n"
-            "{\"tool\":\"cluster.exec\",\"container\":\"autonomous-play-<runid>-api\",\"cmd\":[\"bash\",\"-lc\",\"python -m api_service.main\"],\"timeout_s\":60}\n"
+            "{\"tool\":\"cluster.exec\",\"container\":\"nemotron-play-<runid>-api\",\"cmd\":[\"bash\",\"-lc\",\"python -m api_service.main\"],\"timeout_s\":60}\n"
             "```\n"
             "Use `cluster.logs` to inspect container logs on failures.\n"
             "Also run `cluster.validate` after starting services. Verify end-to-end:\n"

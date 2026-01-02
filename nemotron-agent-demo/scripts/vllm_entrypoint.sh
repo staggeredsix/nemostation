@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_ID="${VLLM_MODEL_ID:-${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}}"
+MODEL_ID="${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}"
 HF_HOME="${HF_HOME:-/root/.cache/huggingface}"
 HF_TOKEN="${HF_TOKEN:-}"
 
