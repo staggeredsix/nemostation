@@ -1,9 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! python -m src.server.healthcheck --host localhost --port ${PORT:-8000}; then
-  echo "Server not ready at http://localhost:${PORT:-8000}. Start the server first." >&2
-  exit 1
-fi
+VLLM_BASE_URL=${VLLM_BASE_URL:-http://localhost:8000/v1}
+
+python - <<PY
+import os
+import sys
+import requests
+
+base_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1").rstrip("/")
+url = f"{base_url}/models"
+try:
+    resp = requests.get(url, timeout=3)
+    if resp.status_code == 200:
+        sys.exit(0)
+except requests.RequestException:
+    pass
+print(f"Server not ready at {url}. Start the vLLM server first.", file=sys.stderr)
+sys.exit(1)
+PY
 
 PYTHONPATH=src:${PYTHONPATH:-} python -m src.demo.cli "$@"

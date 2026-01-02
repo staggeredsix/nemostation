@@ -6,7 +6,7 @@ from typing import List, Tuple
 WORKSPACE_ROOT = "/workspace"
 MAX_OUTPUT_BYTES = 200_000
 DEFAULT_COMMAND_TIMEOUT_S = 120
-CONTAINER_PREFIX = "nemotron-playground-"
+CONTAINER_PREFIX = "autonomous-playground-"
 PLAYGROUND_USER = "1000:1000"
 
 ALLOWLIST = {

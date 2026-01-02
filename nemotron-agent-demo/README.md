@@ -1,14 +1,34 @@
-# Nemotron-3 Nano Agentic Demo (Transformers server)
+# Autonomous Agents Stress Testing
 
-Brain-melty local demo that drives a single Nemotron-3 Nano model through planner/coder/reviewer/ops/aggregator roles and visualizes progress live.
+An agentic demo that runs planner/coder/reviewer/ops/aggregator roles against an OpenAI-compatible vLLM endpoint and visualizes progress live. Built for fast model swaps and stress testing.
 
 ## Features
-- Hugging Face weights only (default `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`).
-- TensorRT-LLM AutoDeploy server at `http://localhost:8000/v1`.
+- vLLM OpenAI-compatible endpoint support (defaults to `http://host.docker.internal:8000/v1`).
+- Model selection via env vars, UI dropdown, or CLI flag (auto-detects via `/models`).
 - Gradio UI with animated status badges, live metrics (approx TTFT, tokens/sec), and progressive timeline updates.
 - CLI demo that streams stage states in the terminal.
+- Simple stress test harness for concurrent requests.
 - Optional Daystrom Memory Lattice (DML) layer for persistent memory + transparent retrievals.
-- Offline-friendly after first model download.
+- Offline-friendly after first model download (if running locally).
+
+## Quickstart (vLLM)
+
+### Known-good model IDs
+- `deepseek/DeepSeek-V3.1-NVFP4/`
+- `mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/`
+
+### Proof-of-life check
+```bash
+curl http://host.docker.internal:8000/v1/models
+```
+
+### Run the UI against vLLM
+```bash
+export VLLM_BASE_URL=http://host.docker.internal:8000/v1
+export VLLM_MODEL_ID=deepseek/DeepSeek-V3.1-NVFP4/
+./run_ui.sh
+```
+The UI will auto-detect models from `/models` and default to the detected list if available.
 
 ## Containerized quickstart (recommended)
 
@@ -25,9 +45,16 @@ Or directly:
 docker compose up --build
 ```
 This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
-- **TRT-LLM server** (`nemotron-trtllm`): nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5, served at `http://localhost:8000/v1`
-- **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
+- **TRT-LLM server** (`autonomous-trtllm`): nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5, served at `http://localhost:8000/v1`
+- **Gradio UI** (`autonomous-ui`): served at `http://localhost:7860`
   - Note: the server image must include CUDA + Python 3.11 so `mamba-ssm` installs from wheels.
+
+### Linux-only note
+If you use `host.docker.internal` on Linux, add the mapping:
+```yaml
+extra_hosts: ["host.docker.internal:host-gateway"]
+```
+(Already present in `docker-compose.kimik2-nvfp4.yml`.)
 
 ### TRT-LLM Server (AutoDeploy)
 ```bash
@@ -40,12 +67,12 @@ UI: `http://localhost:7860`
 
 On first run, TensorRT-LLM may compile/build artifacts and download weights. Subsequent runs reuse `./_trtllm_cache` and `./_hf_cache` for faster startup.
 
-### Rebuild the server image
+### Rebuild the UI image
 If the UI image changes, rebuild with no cache:
 ```bash
-docker compose build --no-cache nemotron-ui
-docker compose up -d --force-recreate nemotron-ui
-docker exec nemotron-ui docker ps
+docker compose build --no-cache autonomous-ui
+docker compose up -d --force-recreate autonomous-ui
+docker exec autonomous-ui docker ps
 ```
 
 ### Kimi-K2 NVFP4 via host vLLM (recommended for GB300 / Grace)
@@ -67,26 +94,28 @@ Note: the model must already exist at `/mnt/raid/kimik2/hf/hub/models--nvidia--K
 ### Build the playground image
 The playground container image is a local-only dev image used by the UI when running command tools. Build it once:
 ```bash
-docker compose --profile playground build nemotron-playground-image
+docker compose --profile playground build autonomous-playground-image
 ```
 
 ### Useful endpoints and volumes
 - Check the server: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
 - On first run the server container warms the model cache (full weights download) before reporting ready; this can take a while depending on your network and disk.
-- Tail the server logs while it downloads: `docker logs -f nemotron-trtllm`
+- Tail the server logs while it downloads: `docker logs -f autonomous-trtllm`
 - Verify cached weights: `ls ./_hf_cache/hub`
 - HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
 - Prompt edits persist in `./prompt_library` (mounted to `/app/prompt_library`)
 - Default prompts and context are bind-mounted read-only from `./prompts` and `./context`
 
 ### Environment overrides
-- `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
+- `VLLM_BASE_URL` (default: `http://host.docker.internal:8000/v1`)
+- `VLLM_MODEL_ID` (default: `deepseek/DeepSeek-V3.1-NVFP4/`)
+- `VLLM_REQUEST_TIMEOUT_S` (default: `120`)
 - `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location (set `HF_TOKEN` for gated models)
-- The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-trtllm:8000/v1`)
+- The UI calls the server at `VLLM_BASE_URL` (set in compose to `http://autonomous-trtllm:8000/v1`)
 
 ### Model requirements
-- Nemotron-3 Nano runs via TensorRT-LLM AutoDeploy with `trust_remote_code=True`.
+- TRT-LLM mode runs via AutoDeploy with `trust_remote_code=True`.
 - Plan for a long first startup: the model weights and tokenizer files are downloaded into `./_hf_cache` and reused on subsequent runs.
 - Toggle reasoning via `chat_template_kwargs.enable_thinking` (or `extra_body.chat_template_kwargs.enable_thinking`) in `/v1/chat/completions` requests.
 
@@ -105,6 +134,18 @@ pip install -r requirements.txt
 ./run_ui.sh
 ```
 Container-first is preferred; local runs still expect a GPU and will download weights into `~/.cache/huggingface`.
+
+## Run the CLI demo
+```bash
+./run_demo_cli.sh "Build a resilient offline LLM demo" --scenario "Ship a resilient offline demo"
+```
+Streams the same stages as the UI using the orchestrator.
+
+## Run the stress test harness
+```bash
+./run_stress_test.sh --concurrency 8 --num-requests 50 --max-tokens 256 --prompt "Explain vLLM batching."
+```
+Use `--endpoint completions` to test `/v1/completions` instead of chat.
 
 ## Managing prompts from the UI
 - Open the **Prompts** tab to manage both goal presets and agent prompts without touching the CLI.
@@ -134,12 +175,6 @@ The DML layer adds **persistent memory** across runs and a **transparent retriev
 
 ### Verify the service
 - Inside the Compose network: `curl http://dml-service:9001/health`
-
-## Run the CLI demo
-```bash
-./run_demo_cli.sh "Build a resilient offline LLM demo" --scenario "Ship a resilient offline demo"
-```
-Streams the same stages as the UI using the orchestrator.
 
 ## Preset scenarios
 - Optimize inference for latency

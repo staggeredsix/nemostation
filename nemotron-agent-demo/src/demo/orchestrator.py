@@ -14,6 +14,7 @@ from src.playground import cluster_manager
 from src.playground import manager as playground_manager
 
 from .agents import AgentResult, call_agent
+from .openai_client import create_openai_client, ensure_vllm_ready
 from .metrics import StageMetrics, compute_throughput, estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -197,13 +198,17 @@ def run_demo_stream(
     use_dml: bool = False,
     dml_top_k: int = 6,
     use_playground: bool = False,
-    playground_image: str = "nemotron-playground:latest",
+    playground_image: str = "autonomous-playground:latest",
     auto_remove_playground: bool = False,
     use_cluster: bool = False,
-    cluster_image: str = "nemotron-playground:latest",
+    cluster_image: str = "autonomous-playground:latest",
     cluster_size: int = 3,
     cluster_run_id: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Generator[Dict, None, None]:
+    model_config = ensure_vllm_ready(model_id)
+    selected_model_id = model_config.model_id
+    client = create_openai_client(base_url=model_config.base_url, timeout_s=model_config.timeout_s)
     stages: List[StageState] = []
     stage_order = ["planner", "coder", "reviewer"]
     if not fast:
@@ -217,7 +222,7 @@ def run_demo_stream(
     else:
         run_id = str(uuid.uuid4())
     long_run_mode = _is_long_run(goal, scenario)
-    playground_name = f"nemotron-playground-{run_id.split('-')[0]}"
+    playground_name = f"autonomous-playground-{run_id.split('-')[0]}"
     playground_log: List[Dict[str, Any]] = []
     playground_info: Dict[str, Any] = {
         "enabled": bool(use_playground),
@@ -455,6 +460,8 @@ def run_demo_stream(
                 max_tokens=max_tokens,
                 extra_context=extra_context,
                 system_messages=system_messages or None,
+                model_id=selected_model_id,
+                client=client,
             )
             elapsed_ms = (time.perf_counter() - stage_start) * 1000
             tokens = estimate_tokens(result.output)
@@ -954,12 +961,13 @@ def run_demo(
     use_dml: bool = False,
     dml_top_k: int = 6,
     use_playground: bool = False,
-    playground_image: str = "nemotron-playground:latest",
+    playground_image: str = "autonomous-playground:latest",
     auto_remove_playground: bool = False,
     use_cluster: bool = False,
-    cluster_image: str = "nemotron-playground:latest",
+    cluster_image: str = "autonomous-playground:latest",
     cluster_size: int = 3,
     cluster_run_id: Optional[str] = None,
+    model_id: Optional[str] = None,
 ) -> Dict:
     last_state = {}
     for state in run_demo_stream(
@@ -975,6 +983,7 @@ def run_demo(
         cluster_image=cluster_image,
         cluster_size=cluster_size,
         cluster_run_id=cluster_run_id,
+        model_id=model_id,
     ):
         last_state = deepcopy(state)
     return last_state

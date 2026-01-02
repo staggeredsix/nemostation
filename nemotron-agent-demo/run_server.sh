@@ -2,6 +2,9 @@
 set -euo pipefail
 
 MODEL_ID=${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
+if [[ -n "${VLLM_MODEL_ID:-}" ]]; then
+  MODEL_ID=${VLLM_MODEL_ID}
+fi
 PORT=${PORT:-8000}
 HOST=0.0.0.0
 
