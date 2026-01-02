@@ -8,7 +8,6 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from .openai_client import fetch_model_ids, get_vllm_base_url
 from .orchestrator import run_demo_stream
 
 console = Console()
@@ -19,8 +18,8 @@ def format_status(status: str) -> str:
     return icons.get(status, status)
 
 
-def run(goal: str, fast: bool = False, scenario: Optional[str] = None, model_id: Optional[str] = None) -> None:
-    table = Table(title="Autonomous Agents Stress Testing", expand=True)
+def run(goal: str, fast: bool = False, scenario: Optional[str] = None) -> None:
+    table = Table(title="Nemotron-3 Nano Agentic Demo", expand=True)
     table.add_column("Stage", style="cyan")
     table.add_column("Status")
     table.add_column("ms")
@@ -29,7 +28,7 @@ def run(goal: str, fast: bool = False, scenario: Optional[str] = None, model_id:
     table.add_column("Tokens")
     console.print(table)
 
-    for state in run_demo_stream(goal, fast=fast, scenario=scenario, model_id=model_id):
+    for state in run_demo_stream(goal, fast=fast, scenario=scenario):
         table.rows.clear()
         for stage in state["stages"]:
             status = format_status(stage["status"])
@@ -56,28 +55,16 @@ def run(goal: str, fast: bool = False, scenario: Optional[str] = None, model_id:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the Autonomous Agents Stress Testing demo via CLI")
+    parser = argparse.ArgumentParser(description="Run the Nemotron agentic demo via CLI")
     parser.add_argument("goal", nargs="?", default="Explain how to optimize a local LLM agent stack")
     parser.add_argument("--scenario", default=None)
     parser.add_argument("--fast", action="store_true")
-    parser.add_argument("--model-id", default=None, help="Model ID to use (overrides VLLM_MODEL_ID)")
-    parser.add_argument("--list-models", action="store_true", help="List available models from /models and exit")
     args = parser.parse_args(argv)
 
     try:
-        if args.list_models:
-            base_url = get_vllm_base_url()
-            models = fetch_model_ids(base_url=base_url)
-            console.print(f"Models at {base_url}/models:")
-            for model in models:
-                console.print(f"- {model}")
-            return 0
-        run(args.goal, fast=args.fast, scenario=args.scenario, model_id=args.model_id)
+        run(args.goal, fast=args.fast, scenario=args.scenario)
     except KeyboardInterrupt:
         console.print("Interrupted", style="red")
-        return 1
-    except Exception as exc:
-        console.print(f"Error: {exc}", style="red")
         return 1
     return 0
 
