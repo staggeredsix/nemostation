@@ -9,6 +9,7 @@ import gradio as gr
 import requests
 
 from src.demo.orchestrator import run_demo_stream
+from src.demo.openai_client import ensure_vllm_ready, get_vllm_base_url
 from src.playground import cluster_manager
 from src.playground import manager as playground_manager
 from src.demo.prompts import (
@@ -26,15 +27,15 @@ from src.demo.prompts import (
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CSS_PATH = STATIC_DIR / "style.css"
 
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://nemotron-server:8000/v1").rstrip("/")
 DOCKER_PLAYGROUND_WARNING = (
     "<div class='banner warning'>Playground requires Docker CLI + /var/run/docker.sock mount.</div>"
 )
 
 
 def ping_server() -> bool:
+    base_url = get_vllm_base_url()
     try:
-        resp = requests.get(f"{OPENAI_BASE_URL}/models", timeout=3)
+        resp = requests.get(f"{base_url}/models", timeout=3)
         return resp.status_code == 200
     except requests.RequestException:
         return False
@@ -402,9 +403,11 @@ def stream_runner(
     cluster_image: str,
     cluster_size: int,
     cluster_run_id: str,
+    model_id: str,
 ):
+    base_url = get_vllm_base_url()
     if not ping_server():
-        raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
+        raise gr.Error(f"Server not ready at {base_url}/models. Start the vLLM server first.")
 
     for state in run_demo_stream(
         goal,
@@ -419,6 +422,7 @@ def stream_runner(
         cluster_image=cluster_image,
         cluster_size=cluster_size,
         cluster_run_id=cluster_run_id or None,
+        model_id=model_id,
     ):
         metrics_html = render_metrics(state)
         timeline_html = render_progress(state["stages"]) + render_dml_stream(state.get("dml", {})) + render_timeline(state)
@@ -478,8 +482,10 @@ def stream_runner(
 
 def build_ui() -> gr.Blocks:
     css = CSS_PATH.read_text()
-    with gr.Blocks(css=css, theme=gr.themes.Soft(), title="Nemoyron 3 Nano Agentic Playground") as demo:
-        gr.Markdown("# Nemoyron 3 Nano Agentic Playground")
+    model_config = ensure_vllm_ready()
+    model_choices = model_config.available_models or [model_config.model_id]
+    with gr.Blocks(css=css, theme=gr.themes.Soft(), title="Autonomous Agents Stress Testing") as demo:
+        gr.Markdown("# Autonomous Agents Stress Testing")
         docker_banner = gr.HTML()
         with gr.Row():
             with gr.Column(scale=1):
@@ -498,12 +504,13 @@ def build_ui() -> gr.Blocks:
                 fast = gr.Checkbox(label="Fast mode (skip Ops, fewer tokens)")
                 use_dml = gr.Checkbox(label="DML Memory ON / OFF")
                 dml_top_k = gr.Slider(label="DML top_k", minimum=1, maximum=10, step=1, value=6, visible=False)
+                model_id = gr.Dropdown(label="Model", choices=model_choices, value=model_config.model_id)
                 use_playground = gr.Checkbox(label="Use Playground Container", value=False)
-                playground_image = gr.Textbox(label="Playground image", value="nemotron-playground:latest", visible=False)
+                playground_image = gr.Textbox(label="Playground image", value="autonomous-playground:latest", visible=False)
                 auto_remove_playground = gr.Checkbox(label="Auto-remove container after run", value=False, visible=False)
                 use_cluster = gr.Checkbox(label="Use Cluster Playground", value=False)
                 cluster_size = gr.Slider(label="Cluster size", minimum=3, maximum=5, step=1, value=4, visible=False)
-                cluster_image = gr.Textbox(label="Cluster image", value="nemotron-playground:latest", visible=False)
+                cluster_image = gr.Textbox(label="Cluster image", value="autonomous-playground:latest", visible=False)
                 create_cluster_btn = gr.Button("Create Cluster", visible=False)
                 validate_cluster_btn = gr.Button("Run Validation", visible=False)
                 destroy_cluster_btn = gr.Button("Destroy Cluster", variant="stop", visible=False)
@@ -828,6 +835,7 @@ def build_ui() -> gr.Blocks:
                 cluster_image,
                 cluster_size,
                 cluster_run_id_state,
+                model_id,
             ],
             outputs=[
                 metrics_card,

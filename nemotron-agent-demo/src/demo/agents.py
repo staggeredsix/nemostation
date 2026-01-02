@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from openai import OpenAI
 
+from .openai_client import create_openai_client
 from .prompts import get_active_prompt, get_context_payload
-
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-API_KEY = "none"
-MODEL_ID = os.getenv("MODEL_ID", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
 
 
 @dataclass
@@ -52,12 +48,16 @@ def call_agent(
     max_tokens: int = 512,
     extra_context: str = "",
     system_messages: Optional[List[str]] = None,
+    model_id: str | None = None,
+    client: OpenAI | None = None,
 ) -> AgentResult:
-    client = OpenAI(base_url=OPENAI_BASE_URL, api_key=API_KEY)
+    if not model_id:
+        raise ValueError("model_id is required for agent calls")
+    resolved_client = client or create_openai_client()
     prompt = get_active_prompt(role)
     messages = build_messages(prompt, goal, scenario, extra_context, system_messages=system_messages)
-    response = client.chat.completions.create(
-        model=MODEL_ID,
+    response = resolved_client.chat.completions.create(
+        model=model_id,
         messages=messages,
         temperature=0.2,
         max_tokens=max_tokens,

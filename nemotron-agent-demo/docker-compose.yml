@@ -1,7 +1,7 @@
 services:
-  nemotron-trtllm:
+  autonomous-trtllm:
     image: nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5
-    container_name: nemotron-trtllm
+    container_name: autonomous-trtllm
     ports:
       - "8000:8000"
     gpus: all
@@ -11,7 +11,7 @@ services:
       memlock: -1
       stack: 67108864
     environment:
-      MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
+      MODEL_ID: ${VLLM_MODEL_ID:-${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}}
       HF_TOKEN: ${HF_TOKEN:-}
       TRTLLM_ENABLE_PDL: 1
     volumes:
@@ -26,14 +26,15 @@ services:
       retries: 300
       start_period: 30m
 
-  nemotron-ui:
+  autonomous-ui:
     build:
       context: ..
       dockerfile: nemotron-agent-demo/Dockerfile.ui
-    container_name: nemotron-ui
+    container_name: autonomous-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
+      VLLM_BASE_URL: http://autonomous-trtllm:8000/v1
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-deepseek/DeepSeek-V3.1-NVFP4/}
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
       DML_BASE_URL: http://dml-service:9001
@@ -50,7 +51,7 @@ services:
       - ../vendors:/app/nemostation/vendors:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      nemotron-trtllm:
+      autonomous-trtllm:
         condition: service_healthy
       dml-service:
         condition: service_healthy
@@ -64,9 +65,9 @@ services:
     environment:
       DML_STORAGE_DIR: /data/dml
       DML_LLM_BACKEND: openai
-      DML_OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
+      DML_OPENAI_BASE_URL: http://autonomous-trtllm:8000/v1
       DML_OPENAI_API_KEY: "null"
-      DML_OPENAI_MODEL: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      DML_OPENAI_MODEL: ${VLLM_MODEL_ID:-deepseek/DeepSeek-V3.1-NVFP4/}
       DML_SUMMARY_MAX_TOKENS: 256
       DML_SUMMARY_TEMPERATURE: 0.2
       DML_SUMMARY_TOP_P: 0.95
@@ -75,7 +76,7 @@ services:
     volumes:
       - ./data/dml:/data/dml
     depends_on:
-      nemotron-trtllm:
+      autonomous-trtllm:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9001/health >/dev/null || exit 1"]
@@ -84,11 +85,11 @@ services:
       retries: 30
       start_period: 20s
 
-  nemotron-playground-image:
+  autonomous-playground-image:
     build:
       context: ..
       dockerfile: nemotron-agent-demo/playground/Dockerfile
-    image: nemotron-playground:latest
+    image: autonomous-playground:latest
     profiles:
       - playground
       - cluster

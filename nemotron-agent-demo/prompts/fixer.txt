@@ -12,7 +12,7 @@ Rules:
 
 Tool request format:
 ```json
-{"tool":"cluster.exec","container":"nemotron-play-<runid>-api","cmd":["bash","-lc","pip install -r /workspace/api_service/requirements.txt"],"timeout_s":120}
+{"tool":"cluster.exec","container":"autonomous-play-<runid>-api","cmd":["bash","-lc","pip install -r /workspace/api_service/requirements.txt"],"timeout_s":120}
 ```
 
 After proposing fixes, summarize what you did and why. Do not claim validation passed unless it is confirmed by a subsequent validation run.

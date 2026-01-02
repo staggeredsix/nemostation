@@ -1,12 +1,13 @@
 services:
-  nemotron-ui:
+  autonomous-ui:
     build:
       context: ..
       dockerfile: nemotron-agent-demo/Dockerfile.ui
-    container_name: nemotron-ui
+    container_name: autonomous-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://host.docker.internal:8000/v1
+      VLLM_BASE_URL: http://host.docker.internal:8000/v1
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-deepseek/DeepSeek-V3.1-NVFP4/}
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
       DML_BASE_URL: http://dml-service:9001
@@ -39,7 +40,7 @@ services:
       DML_LLM_BACKEND: openai
       DML_OPENAI_BASE_URL: http://host.docker.internal:8000/v1
       DML_OPENAI_API_KEY: "null"
-      DML_OPENAI_MODEL: kimi-k2-nvfp4
+      DML_OPENAI_MODEL: ${VLLM_MODEL_ID:-deepseek/DeepSeek-V3.1-NVFP4/}
       DML_SUMMARY_MAX_TOKENS: 256
       DML_SUMMARY_TEMPERATURE: 0.2
       DML_SUMMARY_TOP_P: 0.95
@@ -56,11 +57,11 @@ services:
       retries: 30
       start_period: 20s
 
-  nemotron-playground-image:
+  autonomous-playground-image:
     build:
       context: ..
       dockerfile: nemotron-agent-demo/playground/Dockerfile
-    image: nemotron-playground:latest
+    image: autonomous-playground:latest
     profiles:
       - playground
       - cluster

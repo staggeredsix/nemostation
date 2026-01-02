@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional
 from . import policy
 from .manager import WORKSPACE_ROOT
 
-CLUSTER_PREFIX = "nemotron-play-"
-NETWORK_PREFIX = "nemotron-net-"
+CLUSTER_PREFIX = "autonomous-play-"
+NETWORK_PREFIX = "autonomous-net-"
 DEFAULT_API_INTERNAL_PORT = 8080
 DEFAULT_WEB_INTERNAL_PORT = 7860
 API_HOST_PORT_BASE = 18000
@@ -335,7 +335,7 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
 def exec_in(name: str, cmd: List[str], timeout_s: int = policy.DEFAULT_COMMAND_TIMEOUT_S) -> Dict[str, Any]:
     run_id = _extract_run_id(name)
     if not run_id:
-        return {"exit_code": 126, "stdout": "", "stderr": "Container name must use nemotron-play-<runid>- prefix."}
+        return {"exit_code": 126, "stdout": "", "stderr": "Container name must use autonomous-play-<runid>- prefix."}
     name_error = _validate_container_name(name, run_id)
     if name_error:
         return {"exit_code": 126, "stdout": "", "stderr": name_error}
@@ -366,7 +366,7 @@ def exec_in(name: str, cmd: List[str], timeout_s: int = policy.DEFAULT_COMMAND_T
 def container_logs(name: str, tail: int = 200, timeout_s: int = 15) -> Dict[str, Any]:
     run_id = _extract_run_id(name)
     if not run_id:
-        return {"exit_code": 126, "stdout": "", "stderr": "Container name must use nemotron-play-<runid>- prefix."}
+        return {"exit_code": 126, "stdout": "", "stderr": "Container name must use autonomous-play-<runid>- prefix."}
     name_error = _validate_container_name(name, run_id)
     if name_error:
         return {"exit_code": 126, "stdout": "", "stderr": name_error}
