@@ -170,6 +170,11 @@ body, .gradio-container {
 }
 .server-pill.up { background: #113927; color: var(--success); }
 .server-pill.down { background: #3f1616; color: var(--danger); }
+.server-subtitle {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
 .banner {
   padding: 10px 14px;
   border-radius: 10px;

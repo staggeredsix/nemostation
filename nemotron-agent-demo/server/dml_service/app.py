@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, HTTPException
-from openai import OpenAI
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
 
+from llm_client import create_chat_completion, get_vllm_model_id
 logger = logging.getLogger("dml-service")
 logging.basicConfig(level=logging.INFO)
 
@@ -100,14 +100,6 @@ def _build_adapter() -> DMLAdapter:
     else:
         logger.warning("PersistentRAGStore: disabled")
     return adapter
-
-
-def _openai_client() -> OpenAI:
-    base_url = os.getenv("DML_OPENAI_BASE_URL", "").strip()
-    if not base_url:
-        raise RuntimeError("DML_OPENAI_BASE_URL is not set")
-    api_key = os.getenv("DML_OPENAI_API_KEY", "EMPTY")
-    return OpenAI(base_url=base_url, api_key=api_key)
 
 
 def _summary_settings() -> Dict[str, Any]:
@@ -324,8 +316,6 @@ def _build_cookbook_prompt_from_chunks(payload: RunReportRequest, chunk_summarie
 
 
 def _call_summarizer(
-    client: OpenAI,
-    model: str,
     messages: List[Dict[str, str]],
     max_tokens: int,
     tokenizer: Optional[Any],
@@ -335,8 +325,7 @@ def _call_summarizer(
     start = time.perf_counter()
     summary_meta.setdefault("per_call_input_tokens_est", []).append(_estimate_message_tokens(messages, tokenizer))
     extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
-    response = client.chat.completions.create(
-        model=model,
+    response = create_chat_completion(
         messages=messages,
         temperature=0,
         max_tokens=max_tokens,
@@ -344,10 +333,10 @@ def _call_summarizer(
     )
     latency_ms = int((time.perf_counter() - start) * 1000)
     summary_meta.setdefault("per_call_latency_ms", []).append({label: latency_ms})
-    message = response.choices[0].message
-    summary = (message.content or "").strip()
+    message = response.get("choices", [{}])[0].get("message", {})
+    summary = (message.get("content") or "").strip()
     if not summary:
-        summary = (getattr(message, "reasoning_content", None) or "").strip()
+        summary = (message.get("reasoning_content") or "").strip()
     return summary
 
 
@@ -360,10 +349,7 @@ def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int, Dict[str, 
         "chunk_count": 0,
     }
     try:
-        model = os.getenv("DML_OPENAI_MODEL", "").strip()
-        if not model:
-            raise RuntimeError("DML_OPENAI_MODEL is not set")
-        client = _openai_client()
+        model = get_vllm_model_id()
         tokenizer = _get_tokenizer(model)
         trace_json = json.dumps(payload.trace, ensure_ascii=False, sort_keys=True)
         raw_tokens_est = _estimate_tokens(trace_json, tokenizer)
@@ -393,8 +379,6 @@ def _summarize_cookbook(payload: RunReportRequest) -> tuple[str, int, Dict[str, 
             summary_meta["hard_truncated"] = True
         summary_meta["prompt_tokens_est"] = prompt_tokens_est
         summary = _call_summarizer(
-            client,
-            model,
             messages,
             settings["max_tokens"],
             tokenizer,

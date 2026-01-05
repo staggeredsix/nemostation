@@ -6,7 +6,9 @@ services:
     container_name: nemotron-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://host.docker.internal:8000/v1
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/}
+      VLLM_TIMEOUT_S: ${VLLM_TIMEOUT_S:-120}
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
       DML_BASE_URL: http://dml-service:9001
@@ -37,9 +39,9 @@ services:
     environment:
       DML_STORAGE_DIR: /data/dml
       DML_LLM_BACKEND: openai
-      DML_OPENAI_BASE_URL: http://host.docker.internal:8000/v1
-      DML_OPENAI_API_KEY: "null"
-      DML_OPENAI_MODEL: kimi-k2-nvfp4
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/}
+      VLLM_TIMEOUT_S: ${VLLM_TIMEOUT_S:-120}
       DML_SUMMARY_MAX_TOKENS: 256
       DML_SUMMARY_TEMPERATURE: 0.2
       DML_SUMMARY_TOP_P: 0.95
