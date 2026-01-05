@@ -15,6 +15,8 @@ VLLM_MODEL_ID = os.getenv("VLLM_MODEL_ID", "mistral/Mistral-Large-3-675B-Instruc
 VLLM_TIMEOUT_S = int(os.getenv("VLLM_TIMEOUT_S", "120"))
 
 _startup_check_started = False
+_resolved_model_id: Optional[str] = None
+_model_id_lock = threading.Lock()
 
 
 def get_vllm_base_url() -> str:
@@ -22,7 +24,7 @@ def get_vllm_base_url() -> str:
 
 
 def get_vllm_model_id() -> str:
-    return VLLM_MODEL_ID
+    return _resolve_vllm_model_id()
 
 
 def get_vllm_timeout_s() -> int:
@@ -32,6 +34,33 @@ def get_vllm_timeout_s() -> int:
 def _extract_model_ids(models_payload: dict[str, Any]) -> list[str]:
     data = models_payload.get("data", [])
     return [item.get("id", "") for item in data if isinstance(item, dict) and item.get("id")]
+
+
+def _resolve_vllm_model_id(timeout_s: int = 5, *, force_refresh: bool = False) -> str:
+    global _resolved_model_id
+    if _resolved_model_id is not None and not force_refresh:
+        return _resolved_model_id
+    with _model_id_lock:
+        if _resolved_model_id is not None and not force_refresh:
+            return _resolved_model_id
+        payload = fetch_models(timeout_s=timeout_s)
+        model_ids = _extract_model_ids(payload) if payload else []
+        selected_model = VLLM_MODEL_ID
+        if model_ids:
+            if selected_model in model_ids:
+                _resolved_model_id = selected_model
+            else:
+                _resolved_model_id = model_ids[0]
+                logger.warning(
+                    "vLLM model selected: %s (not found in /models; using=%s; available=%s)",
+                    selected_model,
+                    _resolved_model_id,
+                    ", ".join(model_ids),
+                )
+        else:
+            _resolved_model_id = selected_model
+        return _resolved_model_id
+
 
 def _display_name_for_model_id(model_id: str) -> str:
     if "Mistral-Large-3-675B-Instruct-2512-NVFP4" in model_id:
@@ -60,13 +89,13 @@ def log_model_availability() -> None:
         logger.error("vLLM unavailable at %s", VLLM_BASE_URL)
         return
     model_ids = _extract_model_ids(payload)
-    selected_model = VLLM_MODEL_ID
-    if selected_model in model_ids:
-        logger.info("vLLM model selected: %s (found in /models)", selected_model)
+    resolved_model = _resolve_vllm_model_id(force_refresh=True)
+    if resolved_model in model_ids:
+        logger.info("vLLM model selected: %s (found in /models)", resolved_model)
     else:
         logger.warning(
             "vLLM model selected: %s (not found in /models; available=%s)",
-            selected_model,
+            resolved_model,
             ", ".join(model_ids) if model_ids else "none",
         )
 
@@ -109,7 +138,7 @@ def build_chat_payload(
     extra_payload: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "model": model_id or VLLM_MODEL_ID,
+        "model": model_id or get_vllm_model_id(),
         "messages": list(messages),
     }
     if max_tokens is not None:
