@@ -1,10 +1,9 @@
-# Nemotron-3 Nano Agentic Demo (Transformers server)
+# Station Autonomous Agent Testing
 
-Brain-melty local demo that drives a single Nemotron-3 Nano model through planner/coder/reviewer/ops/aggregator roles and visualizes progress live.
+Agentic demo that drives a single LLM through planner/coder/reviewer/ops/aggregator roles and visualizes progress live.
 
 ## Features
-- Hugging Face weights only (default `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`).
-- TensorRT-LLM AutoDeploy server at `http://localhost:8000/v1`.
+- vLLM OpenAI-compatible endpoint at `http://host.docker.internal:8000/v1` (configurable via `VLLM_BASE_URL`).
 - Gradio UI with animated status badges, live metrics (approx TTFT, tokens/sec), and progressive timeline updates.
 - CLI demo that streams stage states in the terminal.
 - Optional Daystrom Memory Lattice (DML) layer for persistent memory + transparent retrievals.
@@ -24,21 +23,16 @@ Or directly:
 ```bash
 docker compose up --build
 ```
-This builds the Gradio UI image (`Dockerfile.ui`) and launches both containers via `docker compose`:
-- **TRT-LLM server** (`nemotron-trtllm`): nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5, served at `http://localhost:8000/v1`
+This builds the Gradio UI image (`Dockerfile.ui`) and launches the UI + DML services via `docker compose`:
 - **Gradio UI** (`nemotron-ui`): served at `http://localhost:7860`
-  - Note: the server image must include CUDA + Python 3.11 so `mamba-ssm` installs from wheels.
+  - Note: the UI expects a vLLM server running on the host at `http://host.docker.internal:8000/v1` (override with `VLLM_BASE_URL`).
+  - Linux: ensure `host.docker.internal` is mapped via `extra_hosts: ["host.docker.internal:host-gateway"]` (already included in the compose files).
 
-### TRT-LLM Server (AutoDeploy)
-```bash
-docker compose up --build
-```
+### vLLM health check
 ```bash
 curl http://localhost:8000/v1/models
 ```
 UI: `http://localhost:7860`
-
-On first run, TensorRT-LLM may compile/build artifacts and download weights. Subsequent runs reuse `./_trtllm_cache` and `./_hf_cache` for faster startup.
 
 ### Rebuild the server image
 If the UI image changes, rebuild with no cache:
@@ -48,7 +42,7 @@ docker compose up -d --force-recreate nemotron-ui
 docker exec nemotron-ui docker ps
 ```
 
-### Kimi-K2 NVFP4 via host vLLM (recommended for GB300 / Grace)
+### vLLM via host (recommended for GB300 / Grace)
 Terminal 1:
 ```bash
 ./run_kimi_vllm_host.sh
@@ -71,23 +65,18 @@ docker compose --profile playground build nemotron-playground-image
 ```
 
 ### Useful endpoints and volumes
-- Check the server: `curl http://localhost:8000/v1/models`
+- Check vLLM: `curl http://localhost:8000/v1/models`
 - Open the UI: `http://localhost:7860`
-- On first run the server container warms the model cache (full weights download) before reporting ready; this can take a while depending on your network and disk.
-- Tail the server logs while it downloads: `docker logs -f nemotron-trtllm`
-- Verify cached weights: `ls ./_hf_cache/hub`
-- HF cache is persisted to `./_hf_cache` (mounted to `/root/.cache/huggingface`)
 - Prompt edits persist in `./prompt_library` (mounted to `/app/prompt_library`)
 - Default prompts and context are bind-mounted read-only from `./prompts` and `./context`
 
 ### Environment overrides
-- `MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`)
-- `HF_TOKEN` and `HF_HOME` for Hugging Face access/cache location (set `HF_TOKEN` for gated models)
-- The UI calls the server at `OPENAI_BASE_URL` (set in compose to `http://nemotron-trtllm:8000/v1`)
+- `VLLM_BASE_URL` (default: `http://host.docker.internal:8000/v1`)
+- `VLLM_MODEL_ID` (default: `mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/`)
+- `VLLM_TIMEOUT_S` (default: `120`)
 
 ### Model requirements
-- Nemotron-3 Nano runs via TensorRT-LLM AutoDeploy with `trust_remote_code=True`.
-- Plan for a long first startup: the model weights and tokenizer files are downloaded into `./_hf_cache` and reused on subsequent runs.
+- vLLM must expose the OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints.
 - Toggle reasoning via `chat_template_kwargs.enable_thinking` (or `extra_body.chat_template_kwargs.enable_thinking`) in `/v1/chat/completions` requests.
 
 ### Troubleshooting
@@ -101,10 +90,9 @@ docker compose --profile playground build nemotron-playground-image
 cd nemotron-agent-demo
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-./run_server.sh &
-./run_ui.sh
+VLLM_BASE_URL=http://localhost:8000/v1 ./run_ui.sh
 ```
-Container-first is preferred; local runs still expect a GPU and will download weights into `~/.cache/huggingface`.
+Container-first is preferred; local runs expect a vLLM server running on the host.
 
 ## Managing prompts from the UI
 - Open the **Prompts** tab to manage both goal presets and agent prompts without touching the CLI.

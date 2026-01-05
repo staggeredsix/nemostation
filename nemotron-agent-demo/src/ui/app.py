@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Dict, List
 
 import gradio as gr
-import requests
 
 from src.demo.orchestrator import run_demo_stream
 from src.playground import cluster_manager
@@ -22,22 +21,25 @@ from src.demo.prompts import (
     set_active_override,
     upsert_goal_preset,
 )
+from llm_client import fetch_available_model_names, ping_vllm
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CSS_PATH = STATIC_DIR / "style.css"
 
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://nemotron-server:8000/v1").rstrip("/")
 DOCKER_PLAYGROUND_WARNING = (
     "<div class='banner warning'>Playground requires Docker CLI + /var/run/docker.sock mount.</div>"
 )
 
 
 def ping_server() -> bool:
-    try:
-        resp = requests.get(f"{OPENAI_BASE_URL}/models", timeout=3)
-        return resp.status_code == 200
-    except requests.RequestException:
-        return False
+    return ping_vllm()
+
+
+def server_model_names() -> str:
+    names = fetch_available_model_names()
+    if not names:
+        return "Models: unavailable"
+    return f"Models: {', '.join(names)}"
 
 
 def docker_status_banner() -> str:
@@ -478,8 +480,8 @@ def stream_runner(
 
 def build_ui() -> gr.Blocks:
     css = CSS_PATH.read_text()
-    with gr.Blocks(css=css, theme=gr.themes.Soft(), title="Nemoyron 3 Nano Agentic Playground") as demo:
-        gr.Markdown("# Nemoyron 3 Nano Agentic Playground")
+    with gr.Blocks(css=css, theme=gr.themes.Soft(), title="Station Autonomous Agent Testing") as demo:
+        gr.Markdown("# Station Autonomous Agent Testing")
         docker_banner = gr.HTML()
         with gr.Row():
             with gr.Column(scale=1):
@@ -698,7 +700,11 @@ def build_ui() -> gr.Blocks:
             status = ping_server()
             pill_class = "up" if status else "down"
             text = "Online" if status else "Offline"
-            return f"<div class='server-pill {pill_class}'>● Server {text}</div>"
+            model_line = server_model_names()
+            return (
+                f"<div class='server-pill {pill_class}'>● Server {text}</div>"
+                f"<div class='server-subtitle'>{model_line}</div>"
+            )
 
         def toggle_playground(enabled: bool):
             return gr.update(visible=enabled), gr.update(visible=enabled)

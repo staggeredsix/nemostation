@@ -4,5 +4,4 @@ pydantic
 sentence-transformers
 faiss-cpu
 torch
-openai
 requests

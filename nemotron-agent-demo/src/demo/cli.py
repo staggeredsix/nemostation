@@ -19,7 +19,7 @@ def format_status(status: str) -> str:
 
 
 def run(goal: str, fast: bool = False, scenario: Optional[str] = None) -> None:
-    table = Table(title="Nemotron-3 Nano Agentic Demo", expand=True)
+    table = Table(title="Station Autonomous Agent Testing", expand=True)
     table.add_column("Stage", style="cyan")
     table.add_column("Status")
     table.add_column("ms")
@@ -55,7 +55,7 @@ def run(goal: str, fast: bool = False, scenario: Optional[str] = None) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the Nemotron agentic demo via CLI")
+    parser = argparse.ArgumentParser(description="Run the Station Autonomous Agent Testing demo via CLI")
     parser.add_argument("goal", nargs="?", default="Explain how to optimize a local LLM agent stack")
     parser.add_argument("--scenario", default=None)
     parser.add_argument("--fast", action="store_true")

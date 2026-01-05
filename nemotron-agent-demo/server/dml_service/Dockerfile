@@ -12,6 +12,7 @@ COPY nemotron-agent-demo/server/dml_service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY nemotron-agent-demo/server/dml_service ./dml_service
+COPY nemotron-agent-demo/llm_client.py ./llm_client.py
 COPY vendors/daystrom_memory_lattice_alpha1 /app/nemostation/vendors/daystrom_memory_lattice_alpha1
 
 ENV PYTHONPATH=/app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1 \

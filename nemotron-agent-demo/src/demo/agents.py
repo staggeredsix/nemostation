@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from openai import OpenAI
-
 from .prompts import get_active_prompt, get_context_payload
-
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
-API_KEY = "none"
-MODEL_ID = os.getenv("MODEL_ID", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")
+from llm_client import create_chat_completion
 
 
 @dataclass
@@ -53,15 +47,12 @@ def call_agent(
     extra_context: str = "",
     system_messages: Optional[List[str]] = None,
 ) -> AgentResult:
-    client = OpenAI(base_url=OPENAI_BASE_URL, api_key=API_KEY)
     prompt = get_active_prompt(role)
     messages = build_messages(prompt, goal, scenario, extra_context, system_messages=system_messages)
-    response = client.chat.completions.create(
-        model=MODEL_ID,
+    response = create_chat_completion(
         messages=messages,
         temperature=0.2,
         max_tokens=max_tokens,
-        stream=False,
     )
-    content = response.choices[0].message.content or ""
+    content = response.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
     return AgentResult(name=role, output=content.strip())

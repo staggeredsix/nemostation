@@ -1,31 +1,4 @@
 services:
-  nemotron-trtllm:
-    image: nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5
-    container_name: nemotron-trtllm
-    ports:
-      - "8000:8000"
-    gpus: all
-    ipc: host
-    shm_size: "8gb"
-    ulimits:
-      memlock: -1
-      stack: 67108864
-    environment:
-      MODEL_ID: ${MODEL_ID:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
-      HF_TOKEN: ${HF_TOKEN:-}
-      TRTLLM_ENABLE_PDL: 1
-    volumes:
-      - ./_hf_cache:/root/.cache/huggingface
-      - ./_trtllm_cache:/trtllm_cache
-      - ./server/trtllm:/app/trtllm
-    entrypoint: ["/bin/bash", "/app/trtllm/entrypoint.sh"]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 300
-      start_period: 30m
-
   nemotron-ui:
     build:
       context: ..
@@ -33,7 +6,9 @@ services:
     container_name: nemotron-ui
     restart: unless-stopped
     environment:
-      OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/}
+      VLLM_TIMEOUT_S: ${VLLM_TIMEOUT_S:-120}
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
       DML_BASE_URL: http://dml-service:9001
@@ -43,6 +18,8 @@ services:
       - "987"
     ports:
       - "7860:7860"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./prompt_library:/app/prompt_library
       - ./context:/app/context:ro
@@ -50,8 +27,6 @@ services:
       - ../vendors:/app/nemostation/vendors:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      nemotron-trtllm:
-        condition: service_healthy
       dml-service:
         condition: service_healthy
 
@@ -64,9 +39,9 @@ services:
     environment:
       DML_STORAGE_DIR: /data/dml
       DML_LLM_BACKEND: openai
-      DML_OPENAI_BASE_URL: http://nemotron-trtllm:8000/v1
-      DML_OPENAI_API_KEY: "null"
-      DML_OPENAI_MODEL: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/}
+      VLLM_TIMEOUT_S: ${VLLM_TIMEOUT_S:-120}
       DML_SUMMARY_MAX_TOKENS: 256
       DML_SUMMARY_TEMPERATURE: 0.2
       DML_SUMMARY_TOP_P: 0.95
@@ -74,9 +49,8 @@ services:
       PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
     volumes:
       - ./data/dml:/data/dml
-    depends_on:
-      nemotron-trtllm:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9001/health >/dev/null || exit 1"]
       interval: 10s
