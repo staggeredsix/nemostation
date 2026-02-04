@@ -11,7 +11,7 @@ import requests
 logger = logging.getLogger("vllm-client")
 
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://host.docker.internal:8000/v1").rstrip("/")
-VLLM_MODEL_ID = os.getenv("VLLM_MODEL_ID", "mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/")
+VLLM_MODEL_ID = os.getenv("VLLM_MODEL_ID", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4")
 VLLM_TIMEOUT_S = int(os.getenv("VLLM_TIMEOUT_S", "120"))
 
 _startup_check_started = False
@@ -63,8 +63,12 @@ def _resolve_vllm_model_id(timeout_s: int = 5, *, force_refresh: bool = False) -
 
 
 def _display_name_for_model_id(model_id: str) -> str:
+    if "NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4" in model_id:
+        return "Nemotron 3 Nano 30B NVFP4"
     if "Mistral-Large-3-675B-Instruct-2512-NVFP4" in model_id:
         return "Mistral 3 Large NVFP4"
+    if model_id == "kimi-k2-nvfp4":
+        return "Kimi K2 NVFP4"
     return model_id
 
 

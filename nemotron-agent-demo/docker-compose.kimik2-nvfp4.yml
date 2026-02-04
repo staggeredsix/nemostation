@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
-      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/}
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-kimi-k2-nvfp4}
       VLLM_TIMEOUT_S: ${VLLM_TIMEOUT_S:-120}
       GRADIO_SERVER_NAME: 0.0.0.0
       GRADIO_SERVER_PORT: 7860
@@ -40,7 +40,7 @@ services:
       DML_STORAGE_DIR: /data/dml
       DML_LLM_BACKEND: openai
       VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
-      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-mistral/Mistral-Large-3-675B-Instruct-2512-NVFP4/}
+      VLLM_MODEL_ID: ${VLLM_MODEL_ID:-kimi-k2-nvfp4}
       VLLM_TIMEOUT_S: ${VLLM_TIMEOUT_S:-120}
       DML_SUMMARY_MAX_TOKENS: 256
       DML_SUMMARY_TEMPERATURE: 0.2
@@ -48,7 +48,7 @@ services:
       DML_SUMMARY_ENABLE_THINKING: "false"
       PYTHONPATH: /app:/app/nemostation/vendors/daystrom_memory_lattice_alpha1
     volumes:
-      - ./data/dml:/data/dml
+      - ../_dml:/data/dml
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

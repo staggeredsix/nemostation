@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv-kimi-vllm"
 
 PYTHON_BIN=""
@@ -30,14 +31,14 @@ export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 
-export HF_HOME=/mnt/raid/kimik2/hf
-export HUGGINGFACE_HUB_CACHE=/mnt/raid/kimik2/hf
-export VLLM_CACHE_ROOT=/mnt/raid/kimik2/vllm
-export TMPDIR=/mnt/raid/kimik2/tmp
+export HF_HOME="${REPO_ROOT}/_hf_cache"
+export HUGGINGFACE_HUB_CACHE="${REPO_ROOT}/_hf_cache"
+export VLLM_CACHE_ROOT="${REPO_ROOT}/_vllm_cache"
+export TMPDIR="${REPO_ROOT}/_tmp"
 
 mkdir -p "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${VLLM_CACHE_ROOT}" "${TMPDIR}"
 
-MODEL_DIR=/mnt/raid/kimik2/hf/hub/models--nvidia--Kimi-K2-Thinking-NVFP4
+MODEL_DIR="${HUGGINGFACE_HUB_CACHE}/hub/models--nvidia--Kimi-K2-Thinking-NVFP4"
 if [[ ! -f "${MODEL_DIR}/config.json" ]]; then
   echo "Error: ${MODEL_DIR}/config.json not found. Ensure the model is present in the HF hub cache." >&2
   exit 1

@@ -5,14 +5,14 @@ export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
 
-export HF_HOME=/mnt/raid/kimik2/hf
-export HUGGINGFACE_HUB_CACHE=/mnt/raid/kimik2/hf
-export VLLM_CACHE_ROOT=/mnt/raid/kimik2/vllm
-export TMPDIR=/mnt/raid/kimik2/tmp
+export HF_HOME=/workspace/_hf_cache
+export HUGGINGFACE_HUB_CACHE=/workspace/_hf_cache
+export VLLM_CACHE_ROOT=/workspace/_vllm_cache
+export TMPDIR=/workspace/_tmp
 
 mkdir -p "$HF_HOME" "$VLLM_CACHE_ROOT" "$TMPDIR"
 
-KIMI_MODEL_PATH="${KIMI_MODEL_PATH:-/mnt/raid/kimik2/hf/Kimi-K2-Thinking-NVFP4}"
+KIMI_MODEL_PATH="${KIMI_MODEL_PATH:-/workspace/_hf_cache/hub/models--nvidia--Kimi-K2-Thinking-NVFP4}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.90}"

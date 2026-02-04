@@ -5,3 +5,4 @@ sentence-transformers
 faiss-cpu
 torch
 requests
+openai>=1.0.0
