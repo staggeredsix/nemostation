@@ -4,10 +4,15 @@ import hashlib
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import policy
-from .manager import WORKSPACE_ROOT
+from .manager import WORKSPACE_ROOT, AGENT_PROJECTS_ROOT
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_CLUSTER_IMAGE = "nemotron-playground:latest"
+PLAYGROUND_DOCKERFILE = BASE_DIR / "playground" / "Dockerfile"
+PLAYGROUND_BUILD_CONTEXT = BASE_DIR / "playground"
 
 CLUSTER_PREFIX = "nemotron-play-"
 NETWORK_PREFIX = "nemotron-net-"
@@ -22,8 +27,9 @@ RESOURCE_LIMITS = {
     "pids": "256",
 }
 REDIS_IMAGE = "redis:7-alpine"
-ALLOWED_DOCKER_COMMANDS = {"inspect", "run", "exec", "rm", "network", "ps", "logs"}
+ALLOWED_DOCKER_COMMANDS = {"inspect", "run", "exec", "rm", "network", "ps", "logs", "build"}
 ALLOWED_NETWORK_SUBCOMMANDS = {"create", "rm", "inspect"}
+MISSING_IMAGE_HINTS = ("No such image", "No such object", "not found", "pull access denied")
 
 
 def _run_docker(args: List[str], timeout_s: int = 30) -> subprocess.CompletedProcess | None:
@@ -139,30 +145,30 @@ def _build_worker_names(prefix: str, count: int) -> List[str]:
     return names
 
 
-def _role_start_command(role: str) -> List[str]:
+def _role_start_command(role: str, safe_dir: str) -> List[str]:
     if role == "api":
         launch = (
-            "if [ -f /workspace/api_service/main.py ]; then "
+            f"if [ -f {safe_dir}/api_service/main.py ]; then "
             "python -m api_service.main; "
-            "elif [ -f /workspace/api_service/app.py ]; then "
+            f"elif [ -f {safe_dir}/api_service/app.py ]; then "
             "python -m api_service.app; "
-            "else echo 'api_service entrypoint not found.' >&2; exit 1; fi"
+            "else echo 'api_service entrypoint not found; sleeping.' >&2; sleep infinity; fi"
         )
     elif role == "worker":
         launch = (
-            "if [ -f /workspace/worker_service/main.py ]; then "
+            f"if [ -f {safe_dir}/worker_service/main.py ]; then "
             "python -m worker_service.main; "
-            "elif [ -f /workspace/worker_service/app.py ]; then "
+            f"elif [ -f {safe_dir}/worker_service/app.py ]; then "
             "python -m worker_service.app; "
-            "else echo 'worker_service entrypoint not found.' >&2; exit 1; fi"
+            "else echo 'worker_service entrypoint not found; sleeping.' >&2; sleep infinity; fi"
         )
     elif role == "web":
         launch = (
-            "if [ -f /workspace/webui/app.py ]; then "
+            f"if [ -f {safe_dir}/webui/app.py ]; then "
             "python -m webui.app; "
-            "elif [ -f /workspace/webui/main.py ]; then "
+            f"elif [ -f {safe_dir}/webui/main.py ]; then "
             "python -m webui.main; "
-            "else echo 'webui entrypoint not found.' >&2; exit 1; fi"
+            "else echo 'webui entrypoint not found; sleeping.' >&2; sleep infinity; fi"
         )
     else:
         raise ValueError(f"Unsupported role: {role}")
@@ -188,6 +194,32 @@ def _container_role(name: str, prefix: str) -> Optional[str]:
     return None
 
 
+def _resolve_cluster_image(image: str) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+    result = _run_docker(["inspect", "--type=image", image])
+    if result is None:
+        return image, None, None
+    if result.returncode == 0:
+        return image, None, None
+    detail = (result.stderr or result.stdout).strip()
+    if any(hint in detail for hint in MISSING_IMAGE_HINTS):
+        if image == DEFAULT_CLUSTER_IMAGE and PLAYGROUND_DOCKERFILE.exists():
+            build_cmd = [
+                "build",
+                "-t",
+                image,
+                "-f",
+                str(PLAYGROUND_DOCKERFILE),
+                str(PLAYGROUND_BUILD_CONTEXT),
+            ]
+            build_result = _run_docker(build_cmd, timeout_s=600)
+            build_log = _format_log_entry(build_cmd, build_result)
+            if build_result is not None and build_result.returncode == 0:
+                return image, build_log, None
+            return image, build_log, _docker_error(build_result, "failed to build cluster image")
+        return image, None, f"Cluster image {image} not found locally."
+    return image, None, None
+
+
 def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[str]) -> Dict[str, Any]:
     error = _validate_run_id(run_id)
     if error:
@@ -200,24 +232,38 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
     prefix = _cluster_prefix(run_id)
     network = _network_name(run_id)
     workspace_root = Path(workspace_host) if workspace_host else (WORKSPACE_ROOT / f"cluster-{run_id}")
+    agent_projects_root = AGENT_PROJECTS_ROOT / run_id
+    safe_dir = f"/workspace/agent_projects/{run_id}"
     workspace_root.mkdir(parents=True, exist_ok=True)
+    agent_projects_root.mkdir(parents=True, exist_ok=True)
     api_port = _port_for_run(run_id, API_HOST_PORT_BASE)
     web_port = _port_for_run(run_id, WEB_HOST_PORT_BASE)
     include_web = size >= 4
     worker_count = max(1, size - 2 - (1 if include_web else 0))
 
+    log: List[Dict[str, Any]] = []
+    resolved_image, build_log, image_error = _resolve_cluster_image(image)
+    if build_log:
+        log.append(build_log)
+    if image_error:
+        return {"ok": False, "status": "error", "error": image_error, "log": log}
+
     container_defs = [
         ("redis", f"{prefix}redis", REDIS_IMAGE),
-        ("api", f"{prefix}api", image),
+        ("api", f"{prefix}api", resolved_image),
     ]
     for worker_name in _build_worker_names(prefix, worker_count):
-        container_defs.append(("worker", worker_name, image))
+        container_defs.append(("worker", worker_name, resolved_image))
     if include_web:
-        container_defs.append(("web", f"{prefix}web", image))
+        container_defs.append(("web", f"{prefix}web", resolved_image))
 
     network_check = _run_docker(["network", "inspect", network])
+    network_exists = bool(network_check and network_check.returncode == 0)
     existing_containers = _list_cluster_containers(prefix)
-    if network_check and network_check.returncode == 0 and existing_containers:
+    existing_names = set(existing_containers)
+    missing_defs = [definition for definition in container_defs if definition[1] not in existing_names]
+
+    if network_exists and existing_containers and not missing_defs:
         containers = []
         has_web = False
         for name in existing_containers:
@@ -234,40 +280,41 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
             "api_port": api_port,
             "web_port": web_port if has_web else None,
             "workspace_host": str(workspace_root),
-            "workspace_container": policy.WORKSPACE_ROOT,
-            "log": [],
+        "workspace_container": safe_dir,
+            "log": log,
             "error": None,
             "reused": True,
         }
-    if network_check and network_check.returncode == 0 and not existing_containers:
-        return {
-            "ok": False,
-            "status": "error",
-            "error": f"Network {network} already exists without containers.",
-        }
-    if existing_containers and not (network_check and network_check.returncode == 0):
+    if existing_containers and not network_exists:
         return {
             "ok": False,
             "status": "error",
             "error": f"Cluster containers already exist without network {network}.",
+            "log": log,
         }
-    for _, name, _ in container_defs:
-        if _inspect_exists(name):
-            return {"ok": False, "status": "error", "error": f"Container {name} already exists."}
 
-    network_result = _run_docker(["network", "create", network])
-    if network_result is None or network_result.returncode != 0:
-        return {"ok": False, "status": "error", "error": _docker_error(network_result, "Failed to create network.")}
-
-    log: List[Dict[str, Any]] = [_format_log_entry(["network", "create", network], network_result)]
+    if not network_exists:
+        network_result = _run_docker(["network", "create", network])
+        if network_result is None or network_result.returncode != 0:
+            return {"ok": False, "status": "error", "error": _docker_error(network_result, "Failed to create network."), "log": log}
+        log.append(_format_log_entry(["network", "create", network], network_result))
+    elif missing_defs:
+        log.append({"cmd": f"network reuse {network}", "exit_code": 0, "stdout": "reusing existing network", "stderr": ""})
     containers: List[Dict[str, str]] = []
+    if existing_containers:
+        for name in existing_containers:
+            role = _container_role(name, prefix)
+            if role:
+                containers.append({"role": role, "name": name})
     redis_url = f"redis://{prefix}redis:6379/0"
     api_url = f"http://{prefix}api:{DEFAULT_API_INTERNAL_PORT}"
 
-    for role, name, image_name in container_defs:
+    for role, name, image_name in (missing_defs or container_defs):
         name_error = _validate_container_name(name, run_id)
         if name_error:
             return {"ok": False, "status": "error", "error": name_error}
+        if name in existing_names:
+            continue
         cmd = [
             "run",
             "-d",
@@ -288,8 +335,10 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
             cmd += [
                 "-v",
                 f"{workspace_root}:/workspace",
+                "-v",
+                f"{agent_projects_root}:/workspace/agent_projects",
                 "-w",
-                policy.WORKSPACE_ROOT,
+                safe_dir,
                 "--env",
                 f"REDIS_URL={redis_url}",
                 "--env",
@@ -305,7 +354,7 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
             cmd += ["-p", f"{web_port}:{DEFAULT_WEB_INTERNAL_PORT}"]
         cmd.append(image_name)
         if role != "redis":
-            cmd += _role_start_command(role)
+            cmd += _role_start_command(role, safe_dir)
         result = _run_docker(cmd, timeout_s=60)
         log.append(_format_log_entry(cmd, result))
         if result is None or result.returncode != 0:
@@ -325,7 +374,7 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
         "api_port": api_port,
         "web_port": web_port if include_web else None,
         "workspace_host": str(workspace_root),
-        "workspace_container": policy.WORKSPACE_ROOT,
+        "workspace_container": safe_dir,
         "log": log,
         "error": None,
         "reused": False,

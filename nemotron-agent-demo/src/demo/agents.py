@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -11,6 +12,18 @@ from llm_client import create_chat_completion
 class AgentResult:
     name: str
     output: str
+    tokens: int = 0
+
+
+def _extract_completion_tokens(response: dict) -> int:
+    usage = response.get("usage", {}) if isinstance(response, dict) else {}
+    if not isinstance(usage, dict):
+        return 0
+    for key in ("completion_tokens", "output_tokens", "generated_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    return 0
 
 
 def build_messages(
@@ -53,6 +66,19 @@ def call_agent(
         messages=messages,
         temperature=0.2,
         max_tokens=max_tokens,
+        role=role,
     )
-    content = response.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-    return AgentResult(name=role, output=content.strip())
+    message = response.get("choices", [{}])[0].get("message", {}) or {}
+    content = message.get("content", "") or ""
+    if not content:
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            content = json.dumps({"tool_calls": tool_calls}, indent=2)
+        elif message.get("function_call"):
+            content = json.dumps({"function_call": message.get("function_call")}, indent=2)
+        else:
+            finish_reason = response.get("choices", [{}])[0].get("finish_reason")
+            if finish_reason:
+                content = f"No content returned (finish_reason={finish_reason})."
+    tokens = _extract_completion_tokens(response)
+    return AgentResult(name=role, output=content.strip(), tokens=tokens)

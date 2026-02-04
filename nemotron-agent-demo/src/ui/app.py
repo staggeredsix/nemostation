@@ -123,9 +123,9 @@ def render_timeline(state: Dict) -> str:
             f"<div class='timeline-name'>{stage['name']}</div>"
             f"<div>{badge(stage['status'])}</div>"
             f"<div>{stage['ms']:.0f} ms</div>"
-            f"<div>~{stage['ttft_ms']:.0f} ms</div>"
-            f"<div>~{stage['tok_s']:.1f} tok/s</div>"
             f"<div>{stage.get('tokens', 0)} tok</div>"
+            f"<div>~{stage['tok_s']:.1f} tok/s</div>"
+            f"<div>{stage['ttft_ms']:.0f} ms</div>"
             f"</div>"
         )
     return "".join(rows)
@@ -133,22 +133,45 @@ def render_timeline(state: Dict) -> str:
 
 def render_metrics(state: Dict) -> str:
     metrics = state.get("metrics", {})
-    completed = len([s for s in state.get("stages", []) if s["status"] == "done"])
-    total = len(state.get("stages", []))
+
+    def _format_duration(ms: float) -> str:
+        total_seconds = int(ms // 1000)
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes:02d}:{seconds:02d}"
+
     return f"""
     <div class='metrics-grid'>
-      <div class='metrics-card'><div class='label'>Total time</div><div class='value'>{metrics.get('total_ms',0):.0f} ms</div></div>
-      <div class='metrics-card'><div class='label'>Approx TTFT</div><div class='value'>~{metrics.get('approx_ttft_ms',0):.0f} ms</div></div>
+      <div class='metrics-card'><div class='label'>Total time</div><div class='value'>{_format_duration(metrics.get('total_ms',0))}</div></div>
+      <div class='metrics-card'><div class='label'>Total tokens generated</div><div class='value'>{metrics.get('total_tokens',0)}</div></div>
       <div class='metrics-card'><div class='label'>Approx tok/s</div><div class='value'>~{metrics.get('approx_tok_s',0):.1f}</div></div>
-      <div class='metrics-card'><div class='label'>Stages complete</div><div class='value'>{completed}/{total}</div></div>
     </div>
     """
 
 
 def render_agent_outputs(state: Dict) -> Dict[str, str]:
-    outputs = {}
-    for stage in state.get("stages", []):
-        outputs[stage["name"].lower()] = stage.get("output", "") or stage.get("error", "")
+    outputs: Dict[str, str] = {}
+    stage_map = {stage.get("name", "").lower(): stage for stage in state.get("stages", [])}
+    for role in ("planner", "coder", "reviewer", "ops", "aggregator"):
+        stage = stage_map.get(role)
+        if not stage:
+            outputs[role] = "Not run (stage disabled)."
+            continue
+        output = stage.get("output") or stage.get("error") or ""
+        if output:
+            outputs[role] = output
+            continue
+        status = str(stage.get("status", "")).lower()
+        if status == "running":
+            outputs[role] = "Running..."
+        elif status == "queued":
+            outputs[role] = "Queued."
+        elif status == "done":
+            outputs[role] = "No output returned."
+        elif status == "failed":
+            outputs[role] = stage.get("error") or "Failed."
+        else:
+            outputs[role] = f"Status: {status or 'unknown'}."
     return outputs
 
 
@@ -350,41 +373,52 @@ def render_cluster_validation(state: Dict) -> str:
     return "\n".join(lines)
 
 
-def render_playground_log(state: Dict) -> str:
-    def _truncate(text: str, limit: int = 2000) -> str:
+def render_tool_activity(state: Dict) -> str:
+    import html
+
+    def _truncate(text: str, limit: int = 800) -> str:
         if len(text) <= limit:
             return text
         return f"{text[:limit]}...\n[truncated]"
 
     playground = state.get("playground", {})
     cluster = state.get("cluster", {})
-    playground_enabled = bool(playground.get("enabled"))
-    cluster_enabled = bool(cluster.get("enabled"))
-    if not playground_enabled and not cluster_enabled:
-        return "Playground disabled."
     log_entries: List[tuple[str, Dict[str, str]]] = []
     for entry in playground.get("log", []) or []:
         log_entries.append(("playground", entry))
     for entry in cluster.get("log", []) or []:
         log_entries.append(("cluster", entry))
     if not log_entries:
-        return "No playground or cluster commands executed yet."
-    blocks = []
-    for source, entry in log_entries:
-        blocks.append(
-            "\n".join(
-                [
-                    f"[{source}]",
-                    f"$ {entry.get('cmd')}",
-                    f"Exit code: {entry.get('exit_code')}",
-                    "Stdout:",
-                    _truncate(entry.get("stdout", "") or ""),
-                    "Stderr:",
-                    _truncate(entry.get("stderr", "") or ""),
-                ]
+        return "<div class='card'><h3>Tool activity</h3><div class='tool-empty'>No tool activity yet.</div></div>"
+
+    rows = []
+    for source, entry in log_entries[-60:]:
+        cmd = html.escape(entry.get("cmd", "") or "")
+        stdout = html.escape(_truncate(entry.get("stdout", "") or ""))
+        stderr = html.escape(_truncate(entry.get("stderr", "") or ""))
+        exit_code = entry.get("exit_code", "")
+        status = "ok" if exit_code == 0 else "fail"
+        tool_name = html.escape(entry.get("tool", "") or source)
+        detail = ""
+        if stdout or stderr:
+            detail = (
+                "<details>"
+                "<summary>Output</summary>"
+                f"<pre>stdout:\n{stdout}\n\nstderr:\n{stderr}</pre>"
+                "</details>"
             )
+        rows.append(
+            "<div class='tool-row'>"
+            f"<span class='tool-icon {source}'></span>"
+            "<div class='tool-meta'>"
+            f"<div class='tool-title'><span class='tool-source'>{tool_name}</span>"
+            f"<span class='tool-status {status}'>{'OK' if status == 'ok' else 'FAIL'}</span></div>"
+            f"<div class='tool-cmd'>$ {cmd}</div>"
+            f"{detail}"
+            "</div>"
+            "</div>"
         )
-    return "\n\n".join(blocks)
+    return "<div class='card'><h3>Tool activity</h3>" + "".join(rows) + "</div>"
 
 
 def _default_prompt_source() -> str:
@@ -423,13 +457,13 @@ def stream_runner(
         cluster_run_id=cluster_run_id or None,
     ):
         metrics_html = render_metrics(state)
-        timeline_html = render_progress(state["stages"]) + render_dml_stream(state.get("dml", {})) + render_timeline(state)
+        timeline_html = render_dml_stream(state.get("dml", {})) + render_timeline(state)
         outputs = render_agent_outputs(state)
         final_text = state.get("final", "")
         cookbook_panel = render_cookbook_panel(state)
         ingest_panel = render_ingest_panel(state)
         playground_status = render_playground_status(state)
-        playground_log = render_playground_log(state)
+        tool_activity = render_tool_activity(state)
         cluster_status = render_cluster_status(state)
         cluster_validation = render_cluster_validation(state)
         playground_name = state.get("playground", {}).get("name", "")
@@ -463,7 +497,7 @@ def stream_runner(
             playground_name,
             playground_workspace_host,
             playground_workspace_container,
-            playground_log,
+            tool_activity,
             remove_btn_update,
             delete_btn_update,
             playground_name,
@@ -544,7 +578,7 @@ def build_ui() -> gr.Blocks:
                         playground_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
                         playground_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
                     gr.Markdown("Playground command execution log (truncated).")
-                    playground_log = gr.Textbox(label="Playground log", lines=12, elem_classes=["text-panel"])
+                tool_activity = gr.HTML()
                 with gr.Tab("Cluster"):
                     with gr.Row():
                         cluster_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
@@ -852,7 +886,7 @@ def build_ui() -> gr.Blocks:
                 playground_name_display,
                 playground_workspace_host,
                 playground_workspace_container,
-                playground_log,
+                tool_activity,
                 remove_playground_btn,
                 delete_workspace_btn,
                 playground_name_state,
@@ -865,7 +899,7 @@ def build_ui() -> gr.Blocks:
                 delete_cluster_workspace_btn,
                 cluster_run_id_state,
             ],
-            show_progress=True,
+            show_progress=False,
         )
 
         remove_playground_btn.click(

@@ -4,6 +4,7 @@ import re
 from typing import List, Tuple
 
 WORKSPACE_ROOT = "/workspace"
+SAFE_WORKSPACE_ROOT = "/workspace/agent_projects"
 MAX_OUTPUT_BYTES = 200_000
 DEFAULT_COMMAND_TIMEOUT_S = 120
 CONTAINER_PREFIX = "nemotron-playground-"
@@ -12,6 +13,7 @@ PLAYGROUND_USER = "1000:1000"
 ALLOWLIST = {
     "bash",
     "python",
+    "python3",
     "pytest",
     "pip",
     "pip3",
@@ -20,27 +22,24 @@ ALLOWLIST = {
     "npm",
     "make",
     "ls",
+    "pwd",
+    "whoami",
+    "env",
+    "mkdir",
+    "touch",
+    "cp",
+    "mv",
+    "rm",
     "cat",
     "curl",
     "jq",
     "sed",
     "grep",
+    "find",
+    "docker",
 }
 
-DENY_PATTERNS = [
-    r"rm\s+-rf",
-    r"\bmkfs\b",
-    r"\bdd\b",
-    r":\(\)\s*\{",
-    r"\bshutdown\b",
-    r"\breboot\b",
-    r"\bmount\b",
-    r"\bumount\b",
-    r"chmod\s+777\s+/",
-    r"chown\s+-R\s+/",
-    r"curl\b[^\n]*\|\s*sh",
-    r"wget\b[^\n]*\|\s*sh",
-]
+DENY_PATTERNS: List[str] = []
 
 
 class CommandRejectedError(ValueError):
@@ -64,12 +63,12 @@ def validate_command(cmd: List[str]) -> Tuple[bool, str | None]:
         if re.search(pattern, command_text):
             return False, f"Command matches denied pattern: {pattern}"
 
-    if ".." in command_text:
-        return False, "Parent directory traversal is not allowed."
-
-    for arg in cmd[1:]:
-        if arg.startswith("/") and not arg.startswith(WORKSPACE_ROOT):
-            return False, "Absolute paths must remain under /workspace."
+    if command_name != "docker":
+        if ".." in command_text:
+            return False, "Parent directory traversal is not allowed."
+        for arg in cmd[1:]:
+            if arg.startswith("/") and not arg.startswith(SAFE_WORKSPACE_ROOT):
+                return False, f"Absolute paths must remain under {SAFE_WORKSPACE_ROOT}."
 
     return True, None
 

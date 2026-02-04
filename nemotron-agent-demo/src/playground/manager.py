@@ -4,17 +4,23 @@ import json
 import subprocess
 import base64
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import policy
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = BASE_DIR / "playground_workspace"
-DOCKER_ALLOWED_COMMANDS = {"inspect", "start", "run", "exec", "rm"}
+AGENT_PROJECTS_ROOT = BASE_DIR / "agent_projects"
+DOCKER_ALLOWED_COMMANDS = {"inspect", "start", "run", "exec", "rm", "build", "stop", "restart", "ps", "logs", "pull"}
 DOCKER_BLOCKED_COMMANDS = {"prune", "rmi"}
 DOCKER_BLOCKED_SUBCOMMANDS = {("system", "prune"), ("volume", "rm"), ("network", "rm"), ("image", "rm")}
+ALLOWED_CONTAINER_PREFIXES = ("nemotron-playground-", "nemotron-play-")
+DEFAULT_PLAYGROUND_IMAGE = "nemotron-playground:latest"
 FALLBACK_PLAYGROUND_IMAGE = "python:3.11-slim"
-MISSING_IMAGE_HINTS = ("No such image", "No such object", "not found")
+MISSING_IMAGE_HINTS = ("No such image", "No such object", "not found", "pull access denied")
+
+PLAYGROUND_DOCKERFILE = BASE_DIR / "playground" / "Dockerfile"
+PLAYGROUND_BUILD_CONTEXT = BASE_DIR / "playground"
 
 
 def _run_docker(args: List[str], timeout_s: int = 30) -> subprocess.CompletedProcess | None:
@@ -44,11 +50,50 @@ def _run_docker(args: List[str], timeout_s: int = 30) -> subprocess.CompletedPro
         return None
 
 
+def _validate_docker_args(args: List[str]) -> Tuple[bool, str | None]:
+    if not args:
+        return False, "No docker arguments provided."
+    cmd = args[0]
+    if cmd not in DOCKER_ALLOWED_COMMANDS:
+        return False, f"Docker command '{cmd}' is not allowed."
+    if cmd == "run":
+        if "--name" not in args:
+            return False, "Docker run requires --name with an allowed prefix."
+        name_index = args.index("--name") + 1
+        if name_index >= len(args):
+            return False, "Docker run requires a name after --name."
+        name = args[name_index]
+        if not any(name.startswith(prefix) for prefix in ALLOWED_CONTAINER_PREFIXES):
+            return False, f"Container name must start with one of: {', '.join(ALLOWED_CONTAINER_PREFIXES)}"
+    if cmd in {"start", "stop", "restart", "rm", "logs", "inspect", "exec"}:
+        names = [arg for arg in args[1:] if arg and not arg.startswith("-")]
+        for name in names:
+            if name in {"--format", "--tail"}:
+                continue
+            if not any(name.startswith(prefix) for prefix in ALLOWED_CONTAINER_PREFIXES):
+                return False, f"Container name must start with one of: {', '.join(ALLOWED_CONTAINER_PREFIXES)}"
+    return True, None
+
+
 def _docker_error(result: subprocess.CompletedProcess | None, fallback: str) -> str:
     if result is None:
         return fallback
     detail = result.stderr.strip() or result.stdout.strip()
     return detail or fallback
+
+
+def docker_cmd(args: List[str], timeout_s: int = 60) -> Dict[str, Any]:
+    ok, reason = _validate_docker_args(args)
+    if not ok:
+        return {"exit_code": 126, "stdout": "", "stderr": reason or "Invalid docker command."}
+    result = _run_docker(args, timeout_s=timeout_s)
+    if result is None:
+        return {"exit_code": 127, "stdout": "", "stderr": "docker not available"}
+    return {
+        "exit_code": result.returncode,
+        "stdout": result.stdout or "",
+        "stderr": result.stderr or "",
+    }
 
 
 def _validate_container_name(name: str) -> str | None:
@@ -66,6 +111,26 @@ def _resolve_playground_image(image: str) -> tuple[str, Optional[str]]:
         return image, None
     detail = (result.stderr or result.stdout).strip()
     if any(hint in detail for hint in MISSING_IMAGE_HINTS):
+        if image == DEFAULT_PLAYGROUND_IMAGE and PLAYGROUND_DOCKERFILE.exists():
+            build_result = _run_docker(
+                [
+                    "build",
+                    "-t",
+                    image,
+                    "-f",
+                    str(PLAYGROUND_DOCKERFILE),
+                    str(PLAYGROUND_BUILD_CONTEXT),
+                ],
+                timeout_s=600,
+            )
+            if build_result is not None and build_result.returncode == 0:
+                return image, f"Built playground image {image} locally."
+            build_error = _docker_error(build_result, "failed to build playground image")
+            return (
+                FALLBACK_PLAYGROUND_IMAGE,
+                f"Playground image {image} missing and build failed ({build_error}). "
+                f"Falling back to {FALLBACK_PLAYGROUND_IMAGE}.",
+            )
         return (
             FALLBACK_PLAYGROUND_IMAGE,
             f"Playground image {image} not found locally. Falling back to {FALLBACK_PLAYGROUND_IMAGE}.",
@@ -100,8 +165,10 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
     if error:
         return {"name": name, "exists": False, "running": False, "status": "blocked", "error": error}
     workspace_host = (WORKSPACE_ROOT / run_id).resolve()
+    agent_projects_host = (AGENT_PROJECTS_ROOT / run_id).resolve()
     workspace_container = policy.WORKSPACE_ROOT
     workspace_host.mkdir(parents=True, exist_ok=True)
+    agent_projects_host.mkdir(parents=True, exist_ok=True)
     current = status(name)
     if current.get("exists") and current.get("running"):
         current.update(
@@ -132,7 +199,12 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
         )
         return current
 
-    volume_args = ["-v", f"{workspace_host}:/workspace"]
+    volume_args = [
+        "-v",
+        f"{workspace_host}:/workspace",
+        "-v",
+        f"{agent_projects_host}:/workspace/agent_projects",
+    ]
     if repo_mount:
         volume_args += ["-v", f"{Path(repo_mount).resolve()}:/workspace/app"]
 
@@ -212,7 +284,7 @@ def exec_cmd(name: str, cmd: List[str], timeout_s: int = policy.DEFAULT_COMMAND_
     exec_args = [
         "exec",
         "-w",
-        policy.WORKSPACE_ROOT,
+        policy.SAFE_WORKSPACE_ROOT,
         name,
         "timeout",
         "--signal=KILL",
@@ -249,12 +321,12 @@ def write_file(name: str, path: str, content: str) -> Dict:
     except ValueError:
         return {"exit_code": 126, "stdout": "", "stderr": "Invalid path format."}
     if not resolved.is_absolute():
-        return {"exit_code": 126, "stdout": "", "stderr": "Path must be absolute under /workspace."}
+        return {"exit_code": 126, "stdout": "", "stderr": "Path must be absolute under /workspace/agent_projects."}
     if ".." in resolved.parts:
         return {"exit_code": 126, "stdout": "", "stderr": "Parent directory traversal is not allowed."}
-    workspace_root = PurePosixPath(policy.WORKSPACE_ROOT)
+    workspace_root = PurePosixPath(policy.SAFE_WORKSPACE_ROOT)
     if resolved != workspace_root and workspace_root not in resolved.parents:
-        return {"exit_code": 126, "stdout": "", "stderr": "Path must be under /workspace."}
+        return {"exit_code": 126, "stdout": "", "stderr": "Path must be under /workspace/agent_projects."}
 
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
     payload = json.dumps({"path": str(resolved), "data": encoded})

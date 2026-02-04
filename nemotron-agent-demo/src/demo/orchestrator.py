@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
@@ -34,6 +36,7 @@ class StageState:
 DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
 LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
 GIVE_UP_PHRASE = "we cannot complete the task"
+HANDOFF_RE = re.compile(r"^\s*(?:NEXT_ROLE|HANDOFF_TO)\s*:\s*(\w+)\s*$", re.IGNORECASE | re.MULTILINE)
 FIXED_PLAYGROUND_COMMANDS = {
     "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
     "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
@@ -68,7 +71,8 @@ def _serialize(
     completed = [s for s in stages if s.status == "done"]
     total_tokens = sum(s.tokens for s in completed)
     total_ttft = sum(s.ttft_ms for s in completed)
-    approx_tok_s = compute_throughput(total_tokens, total_ms) if total_ms else 0.0
+    summed_tok_s = sum(s.tok_s for s in stages if s.status in {"done", "running"} and s.tok_s > 0)
+    approx_tok_s = summed_tok_s if summed_tok_s > 0 else (compute_throughput(total_tokens, total_ms) if total_ms else 0.0)
     approx_ttft = total_ttft / len(completed) if completed else 0.0
     return {
         "goal": goal,
@@ -76,6 +80,7 @@ def _serialize(
         "stages": [stage.__dict__ for stage in stages],
         "metrics": {
             "total_ms": total_ms,
+            "total_tokens": total_tokens,
             "approx_tok_s": approx_tok_s,
             "approx_ttft_ms": approx_ttft,
         },
@@ -168,6 +173,16 @@ def _agent_gave_up(output: str) -> bool:
     return GIVE_UP_PHRASE in output.lower()
 
 
+def _extract_handoff(output: str) -> Optional[str]:
+    match = HANDOFF_RE.search(output or "")
+    if not match:
+        return None
+    role = match.group(1).strip().lower()
+    if role in {"planner", "coder", "reviewer", "ops", "aggregator"}:
+        return role
+    return None
+
+
 def _run_playground_command(
     playground_name: str,
     cmd: List[str],
@@ -203,6 +218,7 @@ def run_demo_stream(
     cluster_image: str = "nemotron-playground:latest",
     cluster_size: int = 3,
     cluster_run_id: Optional[str] = None,
+    parallel_agents: Optional[bool] = None,
 ) -> Generator[Dict, None, None]:
     stages: List[StageState] = []
     stage_order = ["planner", "coder", "reviewer"]
@@ -352,12 +368,19 @@ def run_demo_stream(
     }
 
     start_time = time.perf_counter()
+    parallel_enabled = (
+        parallel_agents
+        if parallel_agents is not None
+        else os.getenv("AGENT_PARALLEL", "1").strip().lower() in {"1", "true", "yes"}
+    )
     yield _serialize(stages, goal, scenario, final="", total_ms=0, playground=playground_info, cluster=cluster_info, dml=dml_info)
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
     ops_escalation: Optional[str] = None
     ops_fix_count = 0
+    handoff_count = 0
+    handoff_max = int(os.getenv("AGENT_HANDOFF_MAX", "6"))
     trace: Dict[str, Dict[str, Any]] = {
         "stages": {},
         "timings": {},
@@ -388,10 +411,49 @@ def run_demo_stream(
             "workspace_container": cluster_info.get("workspace_container"),
             "enabled": cluster_info.get("enabled"),
         },
+        "handoffs": [],
     }
     base_system_messages: List[str] = []
     if dml_enabled and cookbook_info["found"] and cookbook_info["cookbook_text"]:
         base_system_messages.append(f"DML_COOKBOOK_GUIDANCE:\n{cookbook_info['cookbook_text']}")
+    if use_playground:
+        base_system_messages.append(
+            "PLAYGROUND_TOOLS_AVAILABLE: Use JSON tool requests to run container commands, e.g.\n"
+            "```json\n"
+            "{\"tool\":\"playground.exec\",\"cmd\":[\"bash\",\"-lc\",\"ls -la /workspace\"],\"timeout_s\":60}\n"
+            "```\n"
+            "Manage Docker containers (create/restart/remove) with:\n"
+            "```json\n"
+            "{\"tool\":\"playground.docker\",\"args\":[\"run\",\"-d\",\"--name\",\"nemotron-playground-mybox\",\"ubuntu\",\"sleep\",\"infinity\"],\"timeout_s\":60}\n"
+            "```\n"
+            "Or write files with:\n"
+            "```json\n"
+            "{\"tool\":\"playground.write_file\",\"path\":\"/workspace/README.md\",\"content\":\"...\"}\n"
+            "```"
+        )
+    if use_cluster:
+        base_system_messages.append(
+            "CLUSTER_TOOLS_AVAILABLE: Use JSON tool requests, e.g.\n"
+            "```json\n"
+            "{\"tool\":\"cluster.exec\",\"container\":\"<container>\",\"cmd\":[\"bash\",\"-lc\",\"ls -la /workspace\"],\"timeout_s\":60}\n"
+            "```\n"
+            "Or validate with:\n"
+            "```json\n"
+            "{\"tool\":\"cluster.validate\"}\n"
+            "```"
+        )
+    if use_playground or use_cluster:
+        base_system_messages.append(
+            f"AGENT_PROJECTS_DIR: /workspace/agent_projects/{run_id} (write generated project files here; this maps to repo ./agent_projects/{run_id})."
+        )
+        base_system_messages.append(
+            "SAFE_WORKSPACE_RULE: All tool commands and file writes must stay under AGENT_PROJECTS_DIR."
+        )
+    base_system_messages.append(
+        "HANDOFF_PROTOCOL:\n"
+        "- To route work to another role, include a line: NEXT_ROLE: <planner|coder|reviewer|ops|aggregator>\n"
+        "- Use this only when more work is required; otherwise omit it.\n"
+    )
     if use_cluster:
         container_list = ", ".join([c.get("name", "") for c in cluster_info.get("containers", [])])
         base_system_messages.append(
@@ -409,241 +471,239 @@ def run_demo_stream(
         if cluster_info.get("error"):
             base_system_messages.append(f"CLUSTER_BOOTSTRAP_ERROR:\n{cluster_info.get('error')}\n")
 
-    while stage_queue:
-        stage_name = stage_queue.pop(0)
-        _update_stage(stages, stage_name, status="running")
-        yield _serialize(
-            stages,
-            goal,
-            scenario,
-            final="",
-            total_ms=(time.perf_counter() - start_time) * 1000,
-            playground=playground_info,
-            cluster=cluster_info,
-            dml=dml_info,
-        )
+    def _build_extra_context(stage_name: str, tool_context_snapshot: Optional[List[str]] = None) -> str:
+        extra_context = ""
+        if stage_name == "planner" and ops_escalation:
+            extra_context = f"Ops escalation:\n{ops_escalation}"
+        elif stage_name != "planner":
+            context_parts = [f"{k.title()} Output:\n{v.output}" for k, v in outputs.items()]
+            extra_context = "\n\n".join(context_parts)
+        context_chunks = tool_context_snapshot if tool_context_snapshot is not None else tool_context_chunks
+        if context_chunks:
+            tool_context = "\n\n".join(context_chunks)
+            extra_context = "\n\n".join(filter(None, [extra_context, f"Tool Command Log:\n{tool_context}"]))
+        return extra_context
 
-        stage_start = time.perf_counter()
-        try:
-            extra_context = ""
-            if stage_name == "planner" and ops_escalation:
-                extra_context = f"Ops escalation:\n{ops_escalation}"
-            elif stage_name != "planner":
-                context_parts = [f"{k.title()} Output:\n{v.output}" for k, v in outputs.items()]
-                extra_context = "\n\n".join(context_parts)
-            if tool_context_chunks:
-                tool_context = "\n\n".join(tool_context_chunks)
-                extra_context = "\n\n".join(filter(None, [extra_context, f"Tool Command Log:\n{tool_context}"]))
-            max_tokens = 384 if fast else 640
-            if stage_name == "aggregator":
-                max_tokens = 320 if fast else 512
-            system_messages = list(base_system_messages)
-            if long_run_mode and use_playground and stage_name == "coder":
-                system_messages.append(
-                    "All generated files must be written under /workspace inside the playground container. "
-                    "Use tool steps to create files and run commands."
-                )
-            if long_run_mode and use_cluster and stage_name == "coder":
-                system_messages.append(
-                    "Cluster tools are available: use cluster.exec for container commands, cluster.logs for log collection, "
-                    "and cluster.validate for validation."
-                )
-            result = call_agent(
-                stage_name,
-                goal,
-                scenario,
-                max_tokens=max_tokens,
-                extra_context=extra_context,
-                system_messages=system_messages or None,
+    def _build_system_messages(stage_name: str) -> List[str]:
+        system_messages = list(base_system_messages)
+        if long_run_mode and use_playground and stage_name == "coder":
+            system_messages.append(
+                "All generated files must be written under /workspace inside the playground container. "
+                "Use tool steps to create files and run commands."
             )
-            elapsed_ms = (time.perf_counter() - stage_start) * 1000
-            tokens = estimate_tokens(result.output)
-            tok_s = compute_throughput(tokens, elapsed_ms)
-            metrics = StageMetrics(ms=elapsed_ms, ttft_ms=elapsed_ms, tokens=tokens, tok_s=tok_s)
-            outputs[stage_name] = result
-            stage_trace: Dict[str, Any] = {
-                "output": result.output,
-                "error": None,
-                "ms": metrics.ms,
-                "ttft_ms": metrics.ttft_ms,
-                "tok_s": metrics.tok_s,
-                "tokens": metrics.tokens,
-                "extra_context": extra_context,
-                "system_messages": base_system_messages,
-                "max_tokens": max_tokens,
-            }
-            if long_run_mode and (use_playground or use_cluster):
-                tool_requests = _extract_tool_requests(result.output)
-                tool_entries: List[Dict[str, Any]] = []
-                for request in tool_requests:
-                    tool_name = request.get("tool")
-                    entry: Dict[str, Any]
-                    if tool_name == "playground.exec" and use_playground:
-                        cmd = request.get("cmd")
-                        timeout_s = int(request.get("timeout_s", 60))
-                        if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
-                            entry = {
-                                "cmd": str(cmd),
-                                "exit_code": 125,
-                                "stdout": "",
-                                "stderr": "Invalid command format. Expected list[str].",
-                            }
-                        else:
-                            entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
-                            entry["cmd"] = " ".join(cmd)
-                        tool_context_chunks.append(_format_tool_context(entry))
-                        playground_log.append(entry)
-                    elif tool_name == "playground.write_file" and use_playground:
-                        path = request.get("path")
-                        content = request.get("content")
-                        if not isinstance(path, str) or not isinstance(content, str):
-                            entry = {
-                                "cmd": f"write_file {path}",
-                                "exit_code": 125,
-                                "stdout": "",
-                                "stderr": "Invalid write_file payload. Expected path/content strings.",
-                            }
-                        else:
-                            entry = playground_manager.write_file(playground_name, path, content)
-                            entry["cmd"] = f"write_file {path}"
-                        tool_context_chunks.append(_format_tool_context(entry))
-                        playground_log.append(entry)
-                    elif tool_name == "cluster.exec" and use_cluster:
-                        container = request.get("container")
-                        cmd = request.get("cmd")
-                        timeout_s = int(request.get("timeout_s", 60))
-                        if not isinstance(container, str) or not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
-                            entry = {
-                                "cmd": f"{container} {cmd}",
-                                "exit_code": 125,
-                                "stdout": "",
-                                "stderr": "Invalid cluster.exec payload. Expected container + cmd list.",
-                            }
-                        else:
-                            entry = cluster_manager.exec_in(container, cmd, timeout_s=timeout_s)
-                            entry["cmd"] = f"{container} :: {' '.join(cmd)}"
-                        tool_context_chunks.append(_format_cluster_context(entry))
-                        cluster_log.append(entry)
-                    elif tool_name == "cluster.validate" and use_cluster:
-                        validation = cluster_manager.validate_cluster(run_id)
-                        cluster_info["validation"] = validation
+        if long_run_mode and use_cluster and stage_name == "coder":
+            system_messages.append(
+                "Cluster tools are available: use cluster.exec for container commands, cluster.logs for log collection, "
+                "and cluster.validate for validation."
+            )
+        return system_messages
+
+    def _prepend_safe_dir(cmd: List[str]) -> List[str]:
+        if len(cmd) >= 3 and cmd[0] == "bash" and cmd[1] == "-lc":
+            safe_dir = f"/workspace/agent_projects/{run_id}"
+            return ["bash", "-lc", f"cd {safe_dir} && {cmd[2]}"]
+        return cmd
+
+    def _handle_stage_result(
+        stage_name: str,
+        result: AgentResult,
+        elapsed_ms: float,
+        extra_context: str,
+        system_messages: List[str],
+        max_tokens: int,
+    ) -> None:
+        nonlocal failed, ops_escalation, ops_fix_count
+        tokens = result.tokens or estimate_tokens(result.output)
+        tok_s = compute_throughput(tokens, elapsed_ms)
+        metrics = StageMetrics(ms=elapsed_ms, ttft_ms=elapsed_ms, tokens=tokens, tok_s=tok_s)
+        outputs[stage_name] = result
+        stage_trace: Dict[str, Any] = {
+            "output": result.output,
+            "error": None,
+            "ms": metrics.ms,
+            "ttft_ms": metrics.ttft_ms,
+            "tok_s": metrics.tok_s,
+            "tokens": metrics.tokens,
+            "extra_context": extra_context,
+            "system_messages": system_messages,
+            "max_tokens": max_tokens,
+        }
+        if use_playground or use_cluster:
+            tool_requests = _extract_tool_requests(result.output)
+            tool_entries: List[Dict[str, Any]] = []
+            for request in tool_requests:
+                tool_name = request.get("tool")
+                entry: Dict[str, Any]
+                if tool_name == "playground.exec" and use_playground:
+                    cmd = request.get("cmd")
+                    timeout_s = int(request.get("timeout_s", 60))
+                    if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
                         entry = {
-                            "cmd": "cluster.validate",
-                            "exit_code": 0 if validation.get("ok") else 1,
-                            "stdout": json.dumps(validation, indent=2),
-                            "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                            "cmd": str(cmd),
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid command format. Expected list[str].",
                         }
-                        tool_context_chunks.append(_format_cluster_context(entry))
-                        cluster_log.append(entry)
-                    elif tool_name == "cluster.logs" and use_cluster:
-                        container = request.get("container")
-                        if not isinstance(container, str):
-                            entry = {
-                                "cmd": f"{container} logs",
-                                "exit_code": 125,
-                                "stdout": "",
-                                "stderr": "Invalid cluster.logs payload. Expected container string.",
-                            }
-                        else:
-                            tail_value = request.get("tail", 200)
-                            try:
-                                tail = int(tail_value)
-                            except (TypeError, ValueError):
-                                tail = 200
-                            entry = cluster_manager.container_logs(container, tail=tail)
-                            entry["cmd"] = f"{container} :: logs (tail={tail})"
-                        tool_context_chunks.append(_format_cluster_context(entry))
-                        cluster_log.append(entry)
-                    elif tool_name == "cluster.validate" and use_cluster:
-                        validation = cluster_manager.validate_cluster(run_id)
-                        entry = {
-                            "cmd": "cluster.validate (fixer)",
-                            "exit_code": 0 if validation.get("ok") else 1,
-                            "stdout": json.dumps(validation, indent=2),
-                            "stderr": "" if validation.get("ok") else validation.get("error", ""),
-                        }
-                        tool_context_chunks.append(_format_cluster_context(entry))
-                        cluster_log.append(entry)
                     else:
-                        continue
-                    tool_entries.append(entry)
-                if tool_entries:
-                    stage_trace["tool_requests"] = tool_entries
-                if use_playground:
-                    fixed_command = FIXED_PLAYGROUND_COMMANDS.get(stage_name)
-                    if fixed_command:
-                        fixed_entry = _run_playground_command(
+                        safe_cmd = _prepend_safe_dir(cmd)
+                        entry = playground_manager.exec_cmd(playground_name, safe_cmd, timeout_s=timeout_s)
+                        entry["cmd"] = " ".join(safe_cmd)
+                    tool_context_chunks.append(_format_tool_context(entry))
+                    playground_log.append(entry)
+                elif tool_name == "playground.write_file" and use_playground:
+                    path = request.get("path")
+                    content = request.get("content")
+                    if not isinstance(path, str) or not isinstance(content, str):
+                        entry = {
+                            "cmd": f"write_file {path}",
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid write_file payload. Expected path/content strings.",
+                        }
+                    else:
+                        entry = playground_manager.write_file(playground_name, path, content)
+                        entry["cmd"] = f"write_file {path}"
+                    tool_context_chunks.append(_format_tool_context(entry))
+                    playground_log.append(entry)
+                elif tool_name == "playground.docker" and use_playground:
+                    args = request.get("args") or request.get("cmd")
+                    timeout_s = int(request.get("timeout_s", 60))
+                    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                        entry = {
+                            "cmd": str(args),
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid docker args. Expected list[str].",
+                        }
+                    else:
+                        entry = playground_manager.docker_cmd(args, timeout_s=timeout_s)
+                        entry["cmd"] = f"docker {' '.join(args)}"
+                    tool_context_chunks.append(_format_tool_context(entry))
+                    playground_log.append(entry)
+                elif tool_name == "cluster.exec" and use_cluster:
+                    container = request.get("container")
+                    cmd = request.get("cmd")
+                    timeout_s = int(request.get("timeout_s", 60))
+                    if not isinstance(container, str) or not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
+                        entry = {
+                            "cmd": f"{container} {cmd}",
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid cluster.exec payload. Expected container + cmd list.",
+                        }
+                    else:
+                        safe_cmd = _prepend_safe_dir(cmd)
+                        entry = cluster_manager.exec_in(container, safe_cmd, timeout_s=timeout_s)
+                        entry["cmd"] = f"{container} :: {' '.join(safe_cmd)}"
+                    tool_context_chunks.append(_format_cluster_context(entry))
+                    cluster_log.append(entry)
+                elif tool_name == "cluster.validate" and use_cluster:
+                    validation = cluster_manager.validate_cluster(run_id)
+                    cluster_info["validation"] = validation
+                    entry = {
+                        "cmd": "cluster.validate",
+                        "exit_code": 0 if validation.get("ok") else 1,
+                        "stdout": json.dumps(validation, indent=2),
+                        "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                    }
+                    tool_context_chunks.append(_format_cluster_context(entry))
+                    cluster_log.append(entry)
+                elif tool_name == "cluster.logs" and use_cluster:
+                    container = request.get("container")
+                    if not isinstance(container, str):
+                        entry = {
+                            "cmd": f"{container} logs",
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid cluster.logs payload. Expected container string.",
+                        }
+                    else:
+                        tail_value = request.get("tail", 200)
+                        try:
+                            tail = int(tail_value)
+                        except (TypeError, ValueError):
+                            tail = 200
+                        entry = cluster_manager.container_logs(container, tail=tail)
+                        entry["cmd"] = f"{container} :: logs (tail={tail})"
+                    tool_context_chunks.append(_format_cluster_context(entry))
+                    cluster_log.append(entry)
+                elif tool_name == "cluster.validate" and use_cluster:
+                    validation = cluster_manager.validate_cluster(run_id)
+                    entry = {
+                        "cmd": "cluster.validate (fixer)",
+                        "exit_code": 0 if validation.get("ok") else 1,
+                        "stdout": json.dumps(validation, indent=2),
+                        "stderr": "" if validation.get("ok") else validation.get("error", ""),
+                    }
+                    tool_context_chunks.append(_format_cluster_context(entry))
+                    cluster_log.append(entry)
+                else:
+                    continue
+                entry["tool"] = tool_name
+                tool_entries.append(entry)
+            if tool_entries:
+                stage_trace["tool_requests"] = tool_entries
+            if long_run_mode and use_playground:
+                fixed_command = FIXED_PLAYGROUND_COMMANDS.get(stage_name)
+                if fixed_command:
+                    fixed_entry = _run_playground_command(
+                        playground_name,
+                        fixed_command,
+                        playground_log,
+                        tool_context_chunks,
+                    )
+                    stage_trace["playground_commands"] = [fixed_entry]
+                if stage_name == "planner":
+                    skeleton_entries = []
+                    skeleton_entries.append(
+                        _run_playground_command(
                             playground_name,
-                            fixed_command,
+                            ["bash", "-lc", "mkdir -p /workspace/app /workspace/tests"],
                             playground_log,
                             tool_context_chunks,
                         )
-                        stage_trace["playground_commands"] = [fixed_entry]
-                    if stage_name == "planner":
-                        skeleton_entries = []
-                        skeleton_entries.append(
-                            _run_playground_command(
-                                playground_name,
-                                ["bash", "-lc", "mkdir -p /workspace/app /workspace/tests"],
-                                playground_log,
-                                tool_context_chunks,
-                            )
+                    )
+                    skeleton_entries.append(
+                        _run_playground_command(
+                            playground_name,
+                            [
+                                "bash",
+                                "-lc",
+                                "cat <<'EOF' > /workspace/README.md\n# Workspace\n\nInitialized by long-run mode.\nEOF",
+                            ],
+                            playground_log,
+                            tool_context_chunks,
                         )
-                        skeleton_entries.append(
-                            _run_playground_command(
-                                playground_name,
-                                [
-                                    "bash",
-                                    "-lc",
-                                    "cat <<'EOF' > /workspace/README.md\n# Workspace\n\nInitialized by long-run mode.\nEOF",
-                                ],
-                                playground_log,
-                                tool_context_chunks,
-                            )
-                        )
-                        stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
-            trace["stages"][stage_name] = stage_trace
-            if _agent_gave_up(result.output):
-                trace["errors"].append(
-                    {"stage": stage_name, "error": f"Agent requested stop: {GIVE_UP_PHRASE}"}
-                )
-                failed = True
-            _update_stage(
-                stages,
-                stage_name,
-                status="done",
-                ms=metrics.ms,
-                ttft_ms=metrics.ttft_ms,
-                tok_s=metrics.tok_s,
-                tokens=metrics.tokens,
-                output=result.output,
-            )
-            if stage_name == "planner" and ops_escalation:
-                ops_escalation = None
-        except Exception as exc:  # noqa: BLE001
-            elapsed_ms = (time.perf_counter() - stage_start) * 1000
-            trace["stages"][stage_name] = {
-                "output": "",
-                "error": str(exc),
-                "ms": elapsed_ms,
-                "ttft_ms": elapsed_ms,
-                "tok_s": 0.0,
-                "tokens": 0,
-                "extra_context": extra_context,
-                "system_messages": base_system_messages,
-                "max_tokens": max_tokens,
-            }
-            trace["errors"].append({"stage": stage_name, "error": str(exc)})
-            _update_stage(
-                stages,
-                stage_name,
-                status="failed",
-                ms=elapsed_ms,
-                ttft_ms=elapsed_ms,
-                error=str(exc),
+                    )
+                    stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
+        trace["stages"][stage_name] = stage_trace
+        if _agent_gave_up(result.output):
+            trace["errors"].append(
+                {"stage": stage_name, "error": f"Agent requested stop: {GIVE_UP_PHRASE}"}
             )
             failed = True
+        _update_stage(
+            stages,
+            stage_name,
+            status="done",
+            ms=metrics.ms,
+            ttft_ms=metrics.ttft_ms,
+            tok_s=metrics.tok_s,
+            tokens=metrics.tokens,
+            output=result.output,
+        )
+        if stage_name == "planner" and ops_escalation:
+            ops_escalation = None
+        if handoff_count < handoff_max:
+            next_role = _extract_handoff(result.output)
+            if next_role:
+                stage_queue.insert(0, next_role)
+                handoff_count += 1
+                trace["handoffs"].append({"from": stage_name, "to": next_role, "count": handoff_count})
+        return
 
+    def _finalize_stage(stage_name: str) -> Optional[str]:
+        nonlocal failed, ops_escalation, ops_fix_count
         total_ms = (time.perf_counter() - start_time) * 1000
         final_text = outputs.get("aggregator", AgentResult(stage_name, "")).output if outputs else ""
         trace["timings"]["total_ms"] = total_ms
@@ -704,8 +764,224 @@ def run_demo_stream(
             if use_cluster:
                 cluster_info["ready_for_removal"] = True
             if outputs:
+                return final_text
+            return ""
+        return None
+
+    def _call_agent_timed(stage_name: str, extra_context: str, system_messages: List[str], max_tokens: int) -> tuple[str, AgentResult, float]:
+        start = time.perf_counter()
+        result = call_agent(
+            stage_name,
+            goal,
+            scenario,
+            max_tokens=max_tokens,
+            extra_context=extra_context,
+            system_messages=system_messages or None,
+        )
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        return stage_name, result, elapsed_ms
+
+    while stage_queue:
+        stage_name = stage_queue.pop(0)
+
+        if parallel_enabled and stage_name == "planner":
+            _update_stage(stages, stage_name, status="running")
+            yield _serialize(
+                stages,
+                goal,
+                scenario,
+                final="",
+                total_ms=(time.perf_counter() - start_time) * 1000,
+                playground=playground_info,
+                cluster=cluster_info,
+                dml=dml_info,
+            )
+            extra_context = _build_extra_context(stage_name)
+            max_tokens = 384 if fast else 640
+            system_messages = _build_system_messages(stage_name)
+            try:
+                _, result, elapsed_ms = _call_agent_timed(stage_name, extra_context, system_messages, max_tokens)
+                _handle_stage_result(stage_name, result, elapsed_ms, extra_context, system_messages, max_tokens)
+            except Exception as exc:  # noqa: BLE001
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
+                trace["stages"][stage_name] = {
+                    "output": "",
+                    "error": str(exc),
+                    "ms": elapsed_ms,
+                    "ttft_ms": elapsed_ms,
+                    "tok_s": 0.0,
+                    "tokens": 0,
+                    "extra_context": extra_context,
+                    "system_messages": system_messages,
+                    "max_tokens": max_tokens,
+                }
+                trace["errors"].append({"stage": stage_name, "error": str(exc)})
+                _update_stage(
+                    stages,
+                    stage_name,
+                    status="failed",
+                    ms=elapsed_ms,
+                    ttft_ms=elapsed_ms,
+                    error=str(exc),
+                )
+                failed = True
+
+            finalize_result = yield from _finalize_stage(stage_name)
+            if finalize_result is not None:
                 break
-            return
+            continue
+
+        if parallel_enabled and stage_name in {"coder", "reviewer", "ops"}:
+            batch = [stage_name]
+            while stage_queue and stage_queue[0] in {"coder", "reviewer", "ops"}:
+                batch.append(stage_queue.pop(0))
+            for name in batch:
+                _update_stage(stages, name, status="running")
+            yield _serialize(
+                stages,
+                goal,
+                scenario,
+                final="",
+                total_ms=(time.perf_counter() - start_time) * 1000,
+                playground=playground_info,
+                cluster=cluster_info,
+                dml=dml_info,
+            )
+            tool_context_snapshot = list(tool_context_chunks)
+            shared_context = _build_extra_context(batch[0], tool_context_snapshot=tool_context_snapshot)
+            futures = {}
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                for name in batch:
+                    max_tokens = 384 if fast else 640
+                    system_messages = _build_system_messages(name)
+                    futures[name] = executor.submit(_call_agent_timed, name, shared_context, system_messages, max_tokens)
+            results: Dict[str, Dict[str, Any]] = {}
+            for name, future in futures.items():
+                try:
+                    stage_key, result, elapsed_ms = future.result()
+                    stage_system_messages = _build_system_messages(stage_key)
+                    results[stage_key] = {
+                        "result": result,
+                        "elapsed_ms": elapsed_ms,
+                        "system_messages": stage_system_messages,
+                        "max_tokens": 384 if fast else 640,
+                        "error": None,
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    results[name] = {
+                        "result": AgentResult(name, ""),
+                        "elapsed_ms": 0.0,
+                        "system_messages": _build_system_messages(name),
+                        "max_tokens": 384 if fast else 640,
+                        "error": str(exc),
+                    }
+
+            for name in batch:
+                try:
+                    entry = results[name]
+                    if entry.get("error"):
+                        raise RuntimeError(entry["error"])
+                    result = entry["result"]
+                    elapsed_ms = float(entry["elapsed_ms"])
+                    stage_system_messages = entry["system_messages"]
+                    stage_max_tokens = int(entry["max_tokens"])
+                    _handle_stage_result(
+                        name,
+                        result,
+                        elapsed_ms,
+                        shared_context,
+                        stage_system_messages,
+                        stage_max_tokens,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    entry = results.get(name, {})
+                    stage_system_messages = entry.get("system_messages", [])
+                    stage_max_tokens = entry.get("max_tokens", 384 if fast else 640)
+                    trace["stages"][name] = {
+                        "output": "",
+                        "error": str(exc),
+                        "ms": elapsed_ms,
+                        "ttft_ms": elapsed_ms,
+                        "tok_s": 0.0,
+                        "tokens": 0,
+                        "extra_context": shared_context,
+                        "system_messages": stage_system_messages,
+                        "max_tokens": stage_max_tokens,
+                    }
+                    trace["errors"].append({"stage": name, "error": str(exc)})
+                    _update_stage(
+                        stages,
+                        name,
+                        status="failed",
+                        ms=elapsed_ms,
+                        ttft_ms=elapsed_ms,
+                        error=str(exc),
+                    )
+                    failed = True
+                finalize_result = yield from _finalize_stage(name)
+                if finalize_result is not None:
+                    break
+            if failed:
+                break
+            continue
+
+        _update_stage(stages, stage_name, status="running")
+        yield _serialize(
+            stages,
+            goal,
+            scenario,
+            final="",
+            total_ms=(time.perf_counter() - start_time) * 1000,
+            playground=playground_info,
+            cluster=cluster_info,
+            dml=dml_info,
+        )
+
+        stage_start = time.perf_counter()
+        try:
+            extra_context = _build_extra_context(stage_name)
+            max_tokens = 384 if fast else 640
+            if stage_name == "aggregator":
+                max_tokens = 320 if fast else 512
+            system_messages = _build_system_messages(stage_name)
+            result = call_agent(
+                stage_name,
+                goal,
+                scenario,
+                max_tokens=max_tokens,
+                extra_context=extra_context,
+                system_messages=system_messages or None,
+            )
+            elapsed_ms = (time.perf_counter() - stage_start) * 1000
+            _handle_stage_result(stage_name, result, elapsed_ms, extra_context, system_messages, max_tokens)
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = (time.perf_counter() - stage_start) * 1000
+            trace["stages"][stage_name] = {
+                "output": "",
+                "error": str(exc),
+                "ms": elapsed_ms,
+                "ttft_ms": elapsed_ms,
+                "tok_s": 0.0,
+                "tokens": 0,
+                "extra_context": extra_context,
+                "system_messages": system_messages,
+                "max_tokens": max_tokens,
+            }
+            trace["errors"].append({"stage": stage_name, "error": str(exc)})
+            _update_stage(
+                stages,
+                stage_name,
+                status="failed",
+                ms=elapsed_ms,
+                ttft_ms=elapsed_ms,
+                error=str(exc),
+            )
+            failed = True
+
+        finalize_result = yield from _finalize_stage(stage_name)
+        if finalize_result is not None:
+            break
 
     total_ms = (time.perf_counter() - start_time) * 1000
     final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output

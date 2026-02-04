@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Tuple
 
 import requests
 
@@ -16,15 +16,33 @@ VLLM_TIMEOUT_S = int(os.getenv("VLLM_TIMEOUT_S", "120"))
 
 _startup_check_started = False
 _resolved_model_id: Optional[str] = None
+_resolved_model_ids: dict[Tuple[str, str], str] = {}
 _model_id_lock = threading.Lock()
 
 
-def get_vllm_base_url() -> str:
+def _normalize_role(role: Optional[str]) -> Optional[str]:
+    if not role:
+        return None
+    role_clean = str(role).strip().upper()
+    return role_clean if role_clean else None
+
+
+def _get_role_env(prefix: str, role: Optional[str]) -> Optional[str]:
+    role_key = _normalize_role(role)
+    if not role_key:
+        return None
+    return os.getenv(f"ROLE_{prefix}_{role_key}")
+
+
+def get_vllm_base_url(role: Optional[str] = None) -> str:
+    role_url = _get_role_env("BASE_URL", role)
+    if role_url:
+        return role_url.rstrip("/")
     return VLLM_BASE_URL
 
 
-def get_vllm_model_id() -> str:
-    return _resolve_vllm_model_id()
+def get_vllm_model_id(role: Optional[str] = None) -> str:
+    return _resolve_vllm_model_id(role=role)
 
 
 def get_vllm_timeout_s() -> int:
@@ -36,30 +54,49 @@ def _extract_model_ids(models_payload: dict[str, Any]) -> list[str]:
     return [item.get("id", "") for item in data if isinstance(item, dict) and item.get("id")]
 
 
-def _resolve_vllm_model_id(timeout_s: int = 5, *, force_refresh: bool = False) -> str:
+def _resolve_vllm_model_id(
+    role: Optional[str] = None, timeout_s: int = 5, *, force_refresh: bool = False
+) -> str:
     global _resolved_model_id
-    if _resolved_model_id is not None and not force_refresh:
-        return _resolved_model_id
-    with _model_id_lock:
-        if _resolved_model_id is not None and not force_refresh:
+    requested_model = _get_role_env("MODEL_ID", role) or VLLM_MODEL_ID
+    base_url = get_vllm_base_url(role=role)
+    cache_key = (base_url, requested_model)
+    if not force_refresh:
+        cached = _resolved_model_ids.get(cache_key)
+        if cached:
+            return cached
+        if role is None and _resolved_model_id is not None:
             return _resolved_model_id
-        payload = fetch_models(timeout_s=timeout_s)
+    with _model_id_lock:
+        if not force_refresh:
+            cached = _resolved_model_ids.get(cache_key)
+            if cached:
+                return cached
+            if role is None and _resolved_model_id is not None:
+                return _resolved_model_id
+        payload = fetch_models(timeout_s=timeout_s, base_url=base_url)
         model_ids = _extract_model_ids(payload) if payload else []
-        selected_model = VLLM_MODEL_ID
+        selected_model = requested_model
         if model_ids:
             if selected_model in model_ids:
-                _resolved_model_id = selected_model
+                _resolved_model_ids[cache_key] = selected_model
+                if role is None:
+                    _resolved_model_id = selected_model
             else:
-                _resolved_model_id = model_ids[0]
+                _resolved_model_ids[cache_key] = model_ids[0]
+                if role is None:
+                    _resolved_model_id = model_ids[0]
                 logger.warning(
                     "vLLM model selected: %s (not found in /models; using=%s; available=%s)",
                     selected_model,
-                    _resolved_model_id,
+                    _resolved_model_ids[cache_key],
                     ", ".join(model_ids),
                 )
         else:
-            _resolved_model_id = selected_model
-        return _resolved_model_id
+            _resolved_model_ids[cache_key] = selected_model
+            if role is None:
+                _resolved_model_id = selected_model
+        return _resolved_model_ids[cache_key]
 
 
 def _display_name_for_model_id(model_id: str) -> str:
@@ -72,8 +109,8 @@ def _display_name_for_model_id(model_id: str) -> str:
     return model_id
 
 
-def fetch_models(timeout_s: int = 5) -> Optional[dict[str, Any]]:
-    url = f"{VLLM_BASE_URL}/models"
+def fetch_models(timeout_s: int = 5, base_url: Optional[str] = None) -> Optional[dict[str, Any]]:
+    url = f"{(base_url or VLLM_BASE_URL).rstrip('/')}/models"
     try:
         response = requests.get(url, timeout=timeout_s)
         response.raise_for_status()
@@ -113,8 +150,8 @@ def start_vllm_startup_check() -> None:
     thread.start()
 
 
-def ping_vllm(timeout_s: int = 3) -> bool:
-    url = f"{VLLM_BASE_URL}/models"
+def ping_vllm(timeout_s: int = 3, base_url: Optional[str] = None) -> bool:
+    url = f"{(base_url or VLLM_BASE_URL).rstrip('/')}/models"
     try:
         response = requests.get(url, timeout=timeout_s)
     except requests.RequestException:
@@ -122,8 +159,8 @@ def ping_vllm(timeout_s: int = 3) -> bool:
     return response.status_code == 200
 
 
-def fetch_available_model_names(timeout_s: int = 5) -> list[str]:
-    payload = fetch_models(timeout_s=timeout_s)
+def fetch_available_model_names(timeout_s: int = 5, base_url: Optional[str] = None) -> list[str]:
+    payload = fetch_models(timeout_s=timeout_s, base_url=base_url)
     if payload is None:
         return []
     model_ids = _extract_model_ids(payload)
@@ -160,8 +197,8 @@ def build_chat_payload(
     return payload
 
 
-def post_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
-    url = f"{VLLM_BASE_URL}/chat/completions"
+def post_chat_completion(payload: dict[str, Any], *, base_url: Optional[str] = None) -> dict[str, Any]:
+    url = f"{(base_url or VLLM_BASE_URL).rstrip('/')}/chat/completions"
     response = requests.post(url, json=payload, timeout=VLLM_TIMEOUT_S)
     response.raise_for_status()
     return response.json()
@@ -176,7 +213,10 @@ def create_chat_completion(
     chat_template_kwargs: Optional[dict[str, Any]] = None,
     extra_body: Optional[dict[str, Any]] = None,
     extra_payload: Optional[dict[str, Any]] = None,
+    role: Optional[str] = None,
 ) -> dict[str, Any]:
+    base_url = get_vllm_base_url(role=role)
+    model_id = get_vllm_model_id(role=role)
     payload = build_chat_payload(
         messages,
         max_tokens=max_tokens,
@@ -185,8 +225,9 @@ def create_chat_completion(
         chat_template_kwargs=chat_template_kwargs,
         extra_body=extra_body,
         extra_payload=extra_payload,
+        model_id=model_id,
     )
-    return post_chat_completion(payload)
+    return post_chat_completion(payload, base_url=base_url)
 
 
 start_vllm_startup_check()
