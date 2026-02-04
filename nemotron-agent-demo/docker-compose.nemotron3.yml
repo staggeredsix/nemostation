@@ -1,0 +1,29 @@
+services:
+  nemotron-vllm:
+    image: nvcr.io/nvidia/vllm:25.11-py3
+    container_name: nemotron-vllm
+    restart: unless-stopped
+    gpus: all
+    ipc: host
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGINGFACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ../_hf_cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    command:
+      - --model
+      - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+      - --trust-remote-code
+      - --enforce-eager
+
+  nemotron-ui:
+    environment:
+      VLLM_BASE_URL: http://nemotron-vllm:8000/v1
+      VLLM_MODEL_ID: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+
+  dml-service:
+    environment:
+      VLLM_BASE_URL: http://nemotron-vllm:8000/v1
+      VLLM_MODEL_ID: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
