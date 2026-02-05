@@ -218,6 +218,19 @@ body, .gradio-container {
   color: var(--muted);
   font-style: italic;
 }
+.obs-feed {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.obs-row {
+  padding: 6px 2px;
+  border-bottom: 1px solid #1b2433;
+  font-size: 13px;
+  color: #d7e7f7;
+}
+.obs-row:last-child {
+  border-bottom: none;
+}
 .server-pill {
   padding: 6px 12px;
   border-radius: 999px;

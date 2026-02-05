@@ -81,4 +81,28 @@ def call_agent(
             if finish_reason:
                 content = f"No content returned (finish_reason={finish_reason})."
     tokens = _extract_completion_tokens(response)
+    finish_reason = response.get("choices", [{}])[0].get("finish_reason")
+    if finish_reason == "length":
+        parts = [content.strip()] if content else []
+        total_tokens = tokens
+        for _ in range(2):
+            messages.append({"role": "assistant", "content": parts[-1] if parts else ""})
+            messages.append({"role": "user", "content": "Continue."})
+            follow = create_chat_completion(
+                messages=messages,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                role=role,
+            )
+            follow_msg = follow.get("choices", [{}])[0].get("message", {}) or {}
+            follow_content = (follow_msg.get("content", "") or "").strip()
+            if not follow_content:
+                break
+            parts.append(follow_content)
+            total_tokens += _extract_completion_tokens(follow)
+            finish_reason = follow.get("choices", [{}])[0].get("finish_reason")
+            if finish_reason != "length":
+                break
+        content = "\n".join([p for p in parts if p]).strip()
+        tokens = total_tokens
     return AgentResult(name=role, output=content.strip(), tokens=tokens)

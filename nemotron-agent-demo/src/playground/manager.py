@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import base64
+import os
+import hashlib
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,9 +20,37 @@ ALLOWED_CONTAINER_PREFIXES = ("nemotron-playground-", "nemotron-play-")
 DEFAULT_PLAYGROUND_IMAGE = "nemotron-playground:latest"
 FALLBACK_PLAYGROUND_IMAGE = "python:3.11-slim"
 MISSING_IMAGE_HINTS = ("No such image", "No such object", "not found", "pull access denied")
+DEFAULT_WEB_INTERNAL_PORT = 8000
+PLAYGROUND_HOST_PORT_BASE = 20000
+HOST_PORT_SPAN = 1000
 
 PLAYGROUND_DOCKERFILE = BASE_DIR / "playground" / "Dockerfile"
 PLAYGROUND_BUILD_CONTEXT = BASE_DIR / "playground"
+
+
+def _port_for_run(run_id: str, base: int) -> int:
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    offset = int(digest[:6], 16) % HOST_PORT_SPAN
+    return base + offset
+
+
+def _inspect_port_mapping(name: str, internal_port: int) -> bool:
+    result = _run_docker(["inspect", name, "--format", "{{json .NetworkSettings.Ports}}"])
+    if result is None or result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return False
+    return bool(payload.get(f"{internal_port}/tcp"))
+
+
+def _inspect_container_ip(name: str) -> Optional[str]:
+    result = _run_docker(["inspect", name, "--format", "{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}"])
+    if result is None or result.returncode != 0:
+        return None
+    ip = (result.stdout or "").strip()
+    return ip or None
 
 
 def _run_docker(args: List[str], timeout_s: int = 30) -> subprocess.CompletedProcess | None:
@@ -165,18 +195,36 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
     if error:
         return {"name": name, "exists": False, "running": False, "status": "blocked", "error": error}
     workspace_host = (WORKSPACE_ROOT / run_id).resolve()
-    agent_projects_host = (AGENT_PROJECTS_ROOT / run_id).resolve()
+    agent_projects_host = AGENT_PROJECTS_ROOT.resolve()
     workspace_container = policy.WORKSPACE_ROOT
     workspace_host.mkdir(parents=True, exist_ok=True)
     agent_projects_host.mkdir(parents=True, exist_ok=True)
+    run_projects_host = (agent_projects_host / run_id)
+    run_projects_host.mkdir(parents=True, exist_ok=True)
+    for path in (workspace_host, agent_projects_host, run_projects_host):
+        try:
+            os.chmod(path, 0o777)
+        except PermissionError:
+            pass
+    expose_port = os.getenv("PLAYGROUND_EXPOSE_PORT", "0").strip().lower() in {"1", "true", "yes"}
+    web_port = _port_for_run(run_id, PLAYGROUND_HOST_PORT_BASE) if expose_port else None
+
     current = status(name)
     if current.get("exists") and current.get("running"):
+        warning = None
+        if expose_port and not _inspect_port_mapping(name, DEFAULT_WEB_INTERNAL_PORT):
+            warning = (
+                "Playground container does not expose port 8000. "
+                "Remove and recreate it to access the web server from the host."
+            )
         current.update(
             {
                 "image": image,
                 "workspace_host": str(workspace_host),
                 "workspace_container": workspace_container,
                 "container": name,
+                "web_port": web_port,
+                "warning": warning,
             }
         )
         return current
@@ -195,6 +243,7 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
                 "workspace_host": str(workspace_host),
                 "workspace_container": workspace_container,
                 "container": name,
+                "web_port": web_port,
             }
         )
         return current
@@ -209,30 +258,29 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
         volume_args += ["-v", f"{Path(repo_mount).resolve()}:/workspace/app"]
 
     resolved_image, warning = _resolve_playground_image(image)
-    result = _run_docker(
-        [
-            "run",
-            "-d",
-            "--name",
-            name,
-            "--cpus",
-            "8",
-            "--memory",
-            "16g",
-            "--pids-limit",
-            "512",
-            "--security-opt",
-            "no-new-privileges",
-            "--user",
-            policy.PLAYGROUND_USER,
-            "-w",
-            workspace_container,
-            *volume_args,
-            resolved_image,
-            "sleep",
-            "infinity",
-        ]
-    )
+    run_cmd = [
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--cpus",
+        "8",
+        "--memory",
+        "16g",
+        "--pids-limit",
+        "512",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        policy.PLAYGROUND_USER,
+        "-w",
+        workspace_container,
+        *volume_args,
+    ]
+    if web_port:
+        run_cmd += ["-p", f"{web_port}:{DEFAULT_WEB_INTERNAL_PORT}"]
+    run_cmd += [resolved_image, "sleep", "infinity"]
+    result = _run_docker(run_cmd)
     if result is None:
         return {
             "name": name,
@@ -260,6 +308,7 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
             "container": name,
             "warning": warning,
             "requested_image": image,
+            "web_port": web_port,
         }
     )
     return current
@@ -308,6 +357,113 @@ def exec_cmd(name: str, cmd: List[str], timeout_s: int = policy.DEFAULT_COMMAND_
     }
 
 
+def exec_cmd_detached(name: str, cmd: List[str]) -> Dict:
+    name_error = _validate_container_name(name)
+    if name_error:
+        return {
+            "exit_code": 126,
+            "stdout": "",
+            "stderr": name_error,
+        }
+    allowed, reason = policy.validate_command(cmd)
+    if not allowed:
+        return {
+            "exit_code": 126,
+            "stdout": "",
+            "stderr": reason or "Command rejected by policy.",
+        }
+
+    exec_args = [
+        "exec",
+        "-d",
+        "-w",
+        policy.SAFE_WORKSPACE_ROOT,
+        name,
+        *cmd,
+    ]
+    result = _run_docker(exec_args, timeout_s=15)
+    if result is None:
+        return {
+            "exit_code": 127,
+            "stdout": "",
+            "stderr": "docker not available",
+        }
+    stdout = policy.clamp_output(result.stdout)
+    stderr = policy.clamp_output(result.stderr)
+    return {
+        "exit_code": result.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+
+
+def expose_port(name: str, host_port: int, container_port: int) -> Dict:
+    name_error = _validate_container_name(name)
+    if name_error:
+        return {"ok": False, "error": name_error}
+    if not isinstance(host_port, int) or host_port <= 0:
+        return {"ok": False, "error": "host_port must be a positive integer."}
+    if not isinstance(container_port, int) or container_port <= 0:
+        return {"ok": False, "error": "container_port must be a positive integer."}
+    target_ip = _inspect_container_ip(name)
+    if not target_ip:
+        return {"ok": False, "error": "Unable to resolve playground container IP."}
+    proxy_name = f"{name}-proxy-{host_port}"
+    _run_docker(["rm", "-f", proxy_name])
+    forwarder = (
+        "import socket,threading;"
+        f"TARGET=('{target_ip}',{container_port});"
+        f"LISTEN_PORT={host_port};"
+        "def pipe(src,dst):\n"
+        "    try:\n"
+        "        while True:\n"
+        "            data=src.recv(4096)\n"
+        "            if not data:\n"
+        "                break\n"
+        "            dst.sendall(data)\n"
+        "    finally:\n"
+        "        try: src.close()\n"
+        "        except Exception: pass\n"
+        "        try: dst.close()\n"
+        "        except Exception: pass\n"
+        "def handler(client):\n"
+        "    upstream=socket.create_connection(TARGET)\n"
+        "    threading.Thread(target=pipe,args=(client,upstream),daemon=True).start()\n"
+        "    threading.Thread(target=pipe,args=(upstream,client),daemon=True).start()\n"
+        "server=socket.socket();"
+        "server.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);"
+        "server.bind(('0.0.0.0',LISTEN_PORT));"
+        "server.listen(128);"
+        "print(f'Forwarding 0.0.0.0:{LISTEN_PORT} -> {TARGET[0]}:{TARGET[1]}', flush=True);"
+        "while True:\n"
+        "    client,_=server.accept();"
+        "    threading.Thread(target=handler,args=(client,),daemon=True).start()\n"
+    )
+    run_cmd = [
+        "run",
+        "-d",
+        "--name",
+        proxy_name,
+        "-p",
+        f"{host_port}:{host_port}",
+        "python:3.11-slim",
+        "python",
+        "-u",
+        "-c",
+        forwarder,
+    ]
+    result = _run_docker(run_cmd, timeout_s=60)
+    if result is None or result.returncode != 0:
+        return {"ok": False, "error": _docker_error(result, "Failed to start port proxy."), "cmd": " ".join(run_cmd)}
+    return {
+        "ok": True,
+        "proxy_name": proxy_name,
+        "host_port": host_port,
+        "container_port": container_port,
+        "target_ip": target_ip,
+    }
+
+
 def write_file(name: str, path: str, content: str) -> Dict:
     name_error = _validate_container_name(name)
     if name_error:
@@ -331,7 +487,7 @@ def write_file(name: str, path: str, content: str) -> Dict:
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
     payload = json.dumps({"path": str(resolved), "data": encoded})
     cmd = [
-        "python",
+        "python3",
         "-c",
         (
             "import base64, json, pathlib;"

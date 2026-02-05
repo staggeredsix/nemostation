@@ -9,6 +9,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 from src.memory import dml_http_client
@@ -19,6 +20,8 @@ from .agents import AgentResult, call_agent
 from .metrics import StageMetrics, compute_throughput, estimate_tokens
 
 logger = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).resolve().parents[2]
+HUMAN_INPUT_PATH = BASE_DIR / "prompt_library" / "human_input.json"
 
 
 @dataclass
@@ -41,6 +44,57 @@ FIXED_PLAYGROUND_COMMANDS = {
     "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
     "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
 }
+
+
+def _load_human_messages() -> List[str]:
+    try:
+        raw = HUMAN_INPUT_PATH.read_text()
+    except FileNotFoundError:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    cleaned: List[str] = []
+    for item in payload:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
+def _safe_stage_name(stage_name: str) -> str:
+    safe_name = re.sub(r"[^a-z0-9_-]+", "-", stage_name.lower()).strip("-")
+    return safe_name or "agent"
+
+
+def _should_autobuild_webserver(goal: str) -> bool:
+    goal_text = (goal or "").lower()
+    if "hello world" in goal_text:
+        return True
+    if "hello" in goal_text and "world" in goal_text:
+        return any(token in goal_text for token in ("web", "server", "http", "website", "site"))
+    return False
+
+
+def _write_stage_artifact(run_id: str, stage_name: str, content: str) -> Optional[str]:
+    try:
+        run_root = BASE_DIR / "agent_projects" / run_id / "outputs"
+        run_root.mkdir(parents=True, exist_ok=True)
+        try:
+            run_root.chmod(0o777)
+        except PermissionError:
+            pass
+        safe_name = _safe_stage_name(stage_name)
+        path = run_root / f"{safe_name}.md"
+        path.write_text(content)
+        return str(path)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _initial_state(goal: str, scenario: Optional[str], fast: bool) -> Dict:
@@ -67,6 +121,7 @@ def _serialize(
     playground: Optional[Dict] = None,
     cluster: Optional[Dict] = None,
     dml: Optional[Dict] = None,
+    events: Optional[List[str]] = None,
 ) -> Dict:
     completed = [s for s in stages if s.status == "done"]
     total_tokens = sum(s.tokens for s in completed)
@@ -88,6 +143,7 @@ def _serialize(
         "playground": playground or {},
         "cluster": cluster or {},
         "dml": dml or {},
+        "events": events or [],
     }
 
 
@@ -100,7 +156,10 @@ def _is_long_run(goal: str, scenario: Optional[str]) -> bool:
 
 
 def _extract_tool_requests(text: str) -> List[Dict[str, Any]]:
-    blocks = re.findall(r"```json\\s*(\\{.*?\\})\\s*```", text, flags=re.DOTALL)
+    blocks: List[str] = []
+    blocks.extend(re.findall(r"```json\\s*(\\{.*?\\})\\s*```", text, flags=re.DOTALL))
+    blocks.extend(re.findall(r"```\\s*(\\{.*?\\})\\s*```", text, flags=re.DOTALL))
+    blocks.extend(re.findall(r"(\\{[^{}]*\"tool\"[^{}]*\\})", text, flags=re.DOTALL))
     requests: List[Dict[str, Any]] = []
     for block in blocks:
         try:
@@ -109,6 +168,10 @@ def _extract_tool_requests(text: str) -> List[Dict[str, Any]]:
             continue
         if isinstance(payload, dict) and payload.get("tool"):
             requests.append(payload)
+        elif isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict) and item.get("tool"):
+                    requests.append(item)
     return requests
 
 
@@ -189,9 +252,12 @@ def _run_playground_command(
     playground_log: List[Dict[str, Any]],
     tool_context_chunks: List[str],
     timeout_s: int = 60,
+    agent: Optional[str] = None,
 ) -> Dict[str, Any]:
     entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
     entry["cmd"] = " ".join(cmd)
+    if agent:
+        entry["agent"] = agent
     playground_log.append(entry)
     tool_context_chunks.append(_format_tool_context(entry))
     return entry
@@ -232,7 +298,18 @@ def run_demo_stream(
         run_id = cluster_run_id.strip()
     else:
         run_id = str(uuid.uuid4())
+    run_root = BASE_DIR / "agent_projects" / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    try:
+        run_root.chmod(0o777)
+    except PermissionError:
+        pass
+    readme_path = run_root / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text("Initialized by Nemotron Station run.\n")
     long_run_mode = _is_long_run(goal, scenario)
+    attempt = 1
+    max_attempts = int(os.getenv("AGENT_MAX_ATTEMPTS", "3"))
     playground_name = f"nemotron-playground-{run_id.split('-')[0]}"
     playground_log: List[Dict[str, Any]] = []
     playground_info: Dict[str, Any] = {
@@ -251,6 +328,17 @@ def run_demo_stream(
     }
     cluster_log: List[Dict[str, Any]] = []
     tool_context_chunks: List[str] = []
+    events: List[str] = []
+    events.append(f"Run ID: {run_id}")
+    events.append(f"Attempt {attempt} of {max_attempts}")
+    if not use_playground and not use_cluster:
+        events.append("Playground/Cluster tools are disabled; agents can only return text output.")
+    else:
+        events.append("Tool commands run via docker exec; container logs may not show them.")
+        if use_playground and playground_info.get("web_port"):
+            events.append(f"Playground web URL: http://localhost:{playground_info.get('web_port')}")
+        elif use_playground:
+            events.append("No host port exposed. Use playground.expose_port to publish a port.")
     cluster_info: Dict[str, Any] = {
         "enabled": bool(use_cluster),
         "run_id": run_id,
@@ -283,6 +371,7 @@ def run_demo_stream(
                 "warning": playground_status.get("warning"),
                 "image": playground_status.get("image", playground_image),
                 "requested_image": playground_status.get("requested_image", playground_image),
+                "web_port": playground_status.get("web_port"),
             }
         )
     if use_cluster:
@@ -373,7 +462,17 @@ def run_demo_stream(
         if parallel_agents is not None
         else os.getenv("AGENT_PARALLEL", "1").strip().lower() in {"1", "true", "yes"}
     )
-    yield _serialize(stages, goal, scenario, final="", total_ms=0, playground=playground_info, cluster=cluster_info, dml=dml_info)
+    yield _serialize(
+        stages,
+        goal,
+        scenario,
+        final="",
+        total_ms=0,
+        playground=playground_info,
+        cluster=cluster_info,
+        dml=dml_info,
+        events=events,
+    )
 
     outputs: Dict[str, AgentResult] = {}
     failed = False
@@ -422,6 +521,10 @@ def run_demo_stream(
             "```json\n"
             "{\"tool\":\"playground.exec\",\"cmd\":[\"bash\",\"-lc\",\"ls -la /workspace\"],\"timeout_s\":60}\n"
             "```\n"
+            "Expose ports to the host with:\n"
+            "```json\n"
+            "{\"tool\":\"playground.expose_port\",\"host_port\":18000,\"container_port\":8000}\n"
+            "```\n"
             "Manage Docker containers (create/restart/remove) with:\n"
             "```json\n"
             "{\"tool\":\"playground.docker\",\"args\":[\"run\",\"-d\",\"--name\",\"nemotron-playground-mybox\",\"ubuntu\",\"sleep\",\"infinity\"],\"timeout_s\":60}\n"
@@ -448,6 +551,9 @@ def run_demo_stream(
         )
         base_system_messages.append(
             "SAFE_WORKSPACE_RULE: All tool commands and file writes must stay under AGENT_PROJECTS_DIR."
+        )
+        base_system_messages.append(
+            "REQUIRED: If tools are available, run at least one tool command and write at least one file under AGENT_PROJECTS_DIR."
         )
     base_system_messages.append(
         "HANDOFF_PROTOCOL:\n"
@@ -478,11 +584,69 @@ def run_demo_stream(
         elif stage_name != "planner":
             context_parts = [f"{k.title()} Output:\n{v.output}" for k, v in outputs.items()]
             extra_context = "\n\n".join(context_parts)
+        human_messages = _load_human_messages()
+        if human_messages:
+            human_block = "Human input (most recent last):\n" + "\n".join(f"- {msg}" for msg in human_messages)
+            extra_context = "\n\n".join(filter(None, [extra_context, human_block]))
         context_chunks = tool_context_snapshot if tool_context_snapshot is not None else tool_context_chunks
         if context_chunks:
             tool_context = "\n\n".join(context_chunks)
             extra_context = "\n\n".join(filter(None, [extra_context, f"Tool Command Log:\n{tool_context}"]))
         return extra_context
+
+    def _project_files_exist() -> bool:
+        run_root = BASE_DIR / "agent_projects" / run_id
+        if not run_root.exists():
+            return False
+        for path in run_root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(run_root)
+            if rel.parts and rel.parts[0] == "outputs":
+                continue
+            if rel.name == "README.md":
+                continue
+            return True
+        return False
+
+    def _completion_check() -> tuple[bool, str]:
+        if not _project_files_exist():
+            return False, "No project files created under agent_projects."
+        if _should_autobuild_webserver(goal):
+            app_path = BASE_DIR / "agent_projects" / run_id / "app.py"
+            if not app_path.exists():
+                return False, "Missing app.py for hello world server."
+            if use_playground:
+                check_cmd = _prepend_safe_dir(["bash", "-lc", "curl -sf http://localhost:8000"])
+                entry = playground_manager.exec_cmd(playground_name, check_cmd, timeout_s=30)
+                entry["cmd"] = " ".join(check_cmd)
+                entry["tool"] = "playground.exec"
+                entry["agent"] = "orchestrator"
+                tool_context_chunks.append(_format_tool_context(entry))
+                playground_log.append(entry)
+                if entry.get("exit_code") == 0:
+                    return True, ""
+                start_cmd = _prepend_safe_dir(["bash", "-lc", "python3 app.py"])
+                start_entry = playground_manager.exec_cmd_detached(playground_name, start_cmd)
+                start_entry["cmd"] = " ".join(start_cmd)
+                start_entry["tool"] = "playground.exec_detached"
+                start_entry["agent"] = "orchestrator"
+                tool_context_chunks.append(_format_tool_context(start_entry))
+                playground_log.append(start_entry)
+                if start_entry.get("exit_code") == 0:
+                    events.append("Orchestrator started hello world server (retry).")
+                check_retry = playground_manager.exec_cmd(playground_name, check_cmd, timeout_s=30)
+                check_retry["cmd"] = " ".join(check_cmd)
+                check_retry["tool"] = "playground.exec"
+                check_retry["agent"] = "orchestrator"
+                tool_context_chunks.append(_format_tool_context(check_retry))
+                playground_log.append(check_retry)
+                if check_retry.get("exit_code") == 0:
+                    return True, ""
+                err = check_retry.get("stderr") or check_retry.get("stdout") or "server not responding"
+                return False, f"Server check failed: {err}"
+            return False, "Playground disabled; cannot verify server response."
+        return True, ""
 
     def _build_system_messages(stage_name: str) -> List[str]:
         system_messages = list(base_system_messages)
@@ -512,7 +676,7 @@ def run_demo_stream(
         system_messages: List[str],
         max_tokens: int,
     ) -> None:
-        nonlocal failed, ops_escalation, ops_fix_count
+        nonlocal failed, ops_escalation, ops_fix_count, handoff_count
         tokens = result.tokens or estimate_tokens(result.output)
         tok_s = compute_throughput(tokens, elapsed_ms)
         metrics = StageMetrics(ms=elapsed_ms, ttft_ms=elapsed_ms, tokens=tokens, tok_s=tok_s)
@@ -529,14 +693,17 @@ def run_demo_stream(
             "max_tokens": max_tokens,
         }
         if use_playground or use_cluster:
-            tool_requests = _extract_tool_requests(result.output)
+            output_text = result.output or ""
+            tool_requests = _extract_tool_requests(output_text)
             tool_entries: List[Dict[str, Any]] = []
+            wrote_file = False
             for request in tool_requests:
                 tool_name = request.get("tool")
                 entry: Dict[str, Any]
-                if tool_name == "playground.exec" and use_playground:
+                if tool_name in {"playground.exec", "playground.exec_detached"} and use_playground:
                     cmd = request.get("cmd")
                     timeout_s = int(request.get("timeout_s", 60))
+                    detach = bool(request.get("detach")) or tool_name == "playground.exec_detached"
                     if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
                         entry = {
                             "cmd": str(cmd),
@@ -546,10 +713,18 @@ def run_demo_stream(
                         }
                     else:
                         safe_cmd = _prepend_safe_dir(cmd)
-                        entry = playground_manager.exec_cmd(playground_name, safe_cmd, timeout_s=timeout_s)
+                        if detach:
+                            entry = playground_manager.exec_cmd_detached(playground_name, safe_cmd)
+                        else:
+                            entry = playground_manager.exec_cmd(playground_name, safe_cmd, timeout_s=timeout_s)
                         entry["cmd"] = " ".join(safe_cmd)
+                    entry["agent"] = stage_name
                     tool_context_chunks.append(_format_tool_context(entry))
                     playground_log.append(entry)
+                    if detach and entry.get("exit_code") == 0:
+                        events.append(f"{stage_name.title()} agent started detached command: {' '.join(safe_cmd)}")
+                        if len(events) > 500:
+                            del events[:-500]
                 elif tool_name == "playground.write_file" and use_playground:
                     path = request.get("path")
                     content = request.get("content")
@@ -563,6 +738,8 @@ def run_demo_stream(
                     else:
                         entry = playground_manager.write_file(playground_name, path, content)
                         entry["cmd"] = f"write_file {path}"
+                    entry["agent"] = stage_name
+                    wrote_file = True
                     tool_context_chunks.append(_format_tool_context(entry))
                     playground_log.append(entry)
                 elif tool_name == "playground.docker" and use_playground:
@@ -578,6 +755,42 @@ def run_demo_stream(
                     else:
                         entry = playground_manager.docker_cmd(args, timeout_s=timeout_s)
                         entry["cmd"] = f"docker {' '.join(args)}"
+                    entry["agent"] = stage_name
+                    tool_context_chunks.append(_format_tool_context(entry))
+                    playground_log.append(entry)
+                elif tool_name == "playground.expose_port" and use_playground:
+                    host_port = request.get("host_port") or request.get("port")
+                    container_port = request.get("container_port") or request.get("target_port") or host_port
+                    try:
+                        host_port = int(host_port)
+                        container_port = int(container_port)
+                    except (TypeError, ValueError):
+                        entry = {
+                            "cmd": f"expose_port {host_port}:{container_port}",
+                            "exit_code": 125,
+                            "stdout": "",
+                            "stderr": "Invalid port values. Expected integers.",
+                        }
+                    else:
+                        result = playground_manager.expose_port(playground_name, host_port, container_port)
+                        if result.get("ok"):
+                            playground_info["web_port"] = host_port
+                            events.append(f"Port {host_port} exposed to playground {playground_name}.")
+                            entry = {
+                                "cmd": f"expose_port {host_port}:{container_port}",
+                                "exit_code": 0,
+                                "stdout": json.dumps(result),
+                                "stderr": "",
+                            }
+                        else:
+                            entry = {
+                                "cmd": f"expose_port {host_port}:{container_port}",
+                                "exit_code": 1,
+                                "stdout": "",
+                                "stderr": result.get("error", "Failed to expose port."),
+                            }
+                    entry["tool"] = tool_name
+                    entry["agent"] = stage_name
                     tool_context_chunks.append(_format_tool_context(entry))
                     playground_log.append(entry)
                 elif tool_name == "cluster.exec" and use_cluster:
@@ -595,6 +808,7 @@ def run_demo_stream(
                         safe_cmd = _prepend_safe_dir(cmd)
                         entry = cluster_manager.exec_in(container, safe_cmd, timeout_s=timeout_s)
                         entry["cmd"] = f"{container} :: {' '.join(safe_cmd)}"
+                    entry["agent"] = stage_name
                     tool_context_chunks.append(_format_cluster_context(entry))
                     cluster_log.append(entry)
                 elif tool_name == "cluster.validate" and use_cluster:
@@ -606,6 +820,7 @@ def run_demo_stream(
                         "stdout": json.dumps(validation, indent=2),
                         "stderr": "" if validation.get("ok") else validation.get("error", ""),
                     }
+                    entry["agent"] = stage_name
                     tool_context_chunks.append(_format_cluster_context(entry))
                     cluster_log.append(entry)
                 elif tool_name == "cluster.logs" and use_cluster:
@@ -625,6 +840,7 @@ def run_demo_stream(
                             tail = 200
                         entry = cluster_manager.container_logs(container, tail=tail)
                         entry["cmd"] = f"{container} :: logs (tail={tail})"
+                    entry["agent"] = stage_name
                     tool_context_chunks.append(_format_cluster_context(entry))
                     cluster_log.append(entry)
                 elif tool_name == "cluster.validate" and use_cluster:
@@ -635,6 +851,7 @@ def run_demo_stream(
                         "stdout": json.dumps(validation, indent=2),
                         "stderr": "" if validation.get("ok") else validation.get("error", ""),
                     }
+                    entry["agent"] = stage_name
                     tool_context_chunks.append(_format_cluster_context(entry))
                     cluster_log.append(entry)
                 else:
@@ -643,6 +860,81 @@ def run_demo_stream(
                 tool_entries.append(entry)
             if tool_entries:
                 stage_trace["tool_requests"] = tool_entries
+            if use_playground and not wrote_file:
+                safe_name = _safe_stage_name(stage_name)
+                container_path = f"/workspace/agent_projects/{run_id}/outputs/{safe_name}.md"
+                artifact_text = f"# {stage_name.title()} Output\n\n{output_text}\n"
+                entry = playground_manager.write_file(playground_name, container_path, artifact_text)
+                entry["cmd"] = f"write_file {container_path}"
+                entry["tool"] = "playground.write_file"
+                entry["agent"] = stage_name
+                tool_context_chunks.append(_format_tool_context(entry))
+                playground_log.append(entry)
+                if entry.get("exit_code") == 0:
+                    events.append(f"{stage_name.title()} agent wrote {container_path}.")
+                    if len(events) > 500:
+                        del events[:-500]
+                else:
+                    err = entry.get("stderr") or entry.get("stdout") or "unknown error"
+                    events.append(f"{stage_name.title()} agent failed to write {container_path}: {err}")
+                    if len(events) > 500:
+                        del events[:-500]
+            if stage_name == "coder" and use_playground and not wrote_file and _should_autobuild_webserver(goal):
+                app_path = f"/workspace/agent_projects/{run_id}/app.py"
+                app_content = (
+                    "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+                    "import os\n\n"
+                    "class Handler(BaseHTTPRequestHandler):\n"
+                    "    def do_GET(self):\n"
+                    "        self.send_response(200)\n"
+                    "        self.send_header('Content-Type', 'text/plain; charset=utf-8')\n"
+                    "        self.end_headers()\n"
+                    "        self.wfile.write(b'Hello world!')\n\n"
+                    "def main():\n"
+                    "    port = int(os.getenv('PORT', '8000'))\n"
+                    "    server = HTTPServer(('', port), Handler)\n"
+                    "    print(f'Serving on :{port}')\n"
+                    "    server.serve_forever()\n\n"
+                    "if __name__ == '__main__':\n"
+                    "    main()\n"
+                )
+                write_entry = playground_manager.write_file(playground_name, app_path, app_content)
+                write_entry["cmd"] = f"write_file {app_path}"
+                write_entry["tool"] = "playground.write_file"
+                write_entry["agent"] = "orchestrator"
+                tool_context_chunks.append(_format_tool_context(write_entry))
+                playground_log.append(write_entry)
+                if write_entry.get("exit_code") == 0:
+                    events.append(f"Orchestrator wrote {app_path}.")
+                    if len(events) > 500:
+                        del events[:-500]
+                    start_cmd = _prepend_safe_dir(["bash", "-lc", "python3 app.py"])
+                    start_entry = playground_manager.exec_cmd_detached(playground_name, start_cmd)
+                    start_entry["cmd"] = " ".join(start_cmd)
+                    start_entry["tool"] = "playground.exec_detached"
+                    start_entry["agent"] = "orchestrator"
+                    tool_context_chunks.append(_format_tool_context(start_entry))
+                    playground_log.append(start_entry)
+                    if start_entry.get("exit_code") == 0:
+                        events.append("Orchestrator started hello world server (detached).")
+                        if len(events) > 500:
+                            del events[:-500]
+                    verify_cmd = _prepend_safe_dir(["bash", "-lc", "sleep 1; curl -sf http://localhost:8000"])
+                    verify_entry = playground_manager.exec_cmd(playground_name, verify_cmd, timeout_s=30)
+                    verify_entry["cmd"] = " ".join(verify_cmd)
+                    verify_entry["tool"] = "playground.exec"
+                    verify_entry["agent"] = "orchestrator"
+                    tool_context_chunks.append(_format_tool_context(verify_entry))
+                    playground_log.append(verify_entry)
+                    if verify_entry.get("exit_code") == 0:
+                        events.append("Orchestrator verified hello world response.")
+                        if len(events) > 500:
+                            del events[:-500]
+                else:
+                    err = write_entry.get("stderr") or write_entry.get("stdout") or "unknown error"
+                    events.append(f"Orchestrator failed to write {app_path}: {err}")
+                    if len(events) > 500:
+                        del events[:-500]
             if long_run_mode and use_playground:
                 fixed_command = FIXED_PLAYGROUND_COMMANDS.get(stage_name)
                 if fixed_command:
@@ -651,6 +943,7 @@ def run_demo_stream(
                         fixed_command,
                         playground_log,
                         tool_context_chunks,
+                        agent=stage_name,
                     )
                     stage_trace["playground_commands"] = [fixed_entry]
                 if stage_name == "planner":
@@ -661,6 +954,7 @@ def run_demo_stream(
                             ["bash", "-lc", "mkdir -p /workspace/app /workspace/tests"],
                             playground_log,
                             tool_context_chunks,
+                            agent=stage_name,
                         )
                     )
                     skeleton_entries.append(
@@ -673,9 +967,17 @@ def run_demo_stream(
                             ],
                             playground_log,
                             tool_context_chunks,
+                            agent=stage_name,
                         )
                     )
                     stage_trace.setdefault("playground_commands", []).extend(skeleton_entries)
+        artifact_text = f"# {stage_name.title()} Output\n\n{result.output or ''}\n"
+        artifact_path = _write_stage_artifact(run_id, stage_name, artifact_text)
+        if artifact_path:
+            events.append(f"{stage_name.title()} agent saved output to {artifact_path}.")
+            if len(events) > 500:
+                del events[:-500]
+
         trace["stages"][stage_name] = stage_trace
         if _agent_gave_up(result.output):
             trace["errors"].append(
@@ -703,7 +1005,7 @@ def run_demo_stream(
         return
 
     def _finalize_stage(stage_name: str) -> Optional[str]:
-        nonlocal failed, ops_escalation, ops_fix_count
+        nonlocal failed, ops_escalation, ops_fix_count, attempt, outputs
         total_ms = (time.perf_counter() - start_time) * 1000
         final_text = outputs.get("aggregator", AgentResult(stage_name, "")).output if outputs else ""
         trace["timings"]["total_ms"] = total_ms
@@ -716,6 +1018,7 @@ def run_demo_stream(
             playground=playground_info,
             cluster=cluster_info,
             dml=dml_info,
+            events=events,
         )
 
         if not failed and stage_name == "ops" and stage_name in outputs:
@@ -740,6 +1043,40 @@ def run_demo_stream(
                 else:
                     stage_queue.extend(retry_stages)
 
+        if not failed and stage_name == "aggregator":
+            ok, reason = _completion_check()
+            if not ok:
+                events.append(f"Completion check failed: {reason}")
+                if attempt < max_attempts:
+                    attempt += 1
+                    events.append(f"Retrying attempt {attempt} of {max_attempts}")
+                    ops_escalation = f"Task incomplete: {reason}"
+                    outputs.clear()
+                    for stage in stages:
+                        stage.status = "queued"
+                        stage.ms = 0.0
+                        stage.ttft_ms = 0.0
+                        stage.tok_s = 0.0
+                        stage.tokens = 0
+                        stage.output = ""
+                        stage.error = None
+                    retry_stages = list(stage_order)
+                    stage_queue.extend(retry_stages)
+                    yield _serialize(
+                        stages,
+                        goal,
+                        scenario,
+                        final=final_text,
+                        total_ms=total_ms,
+                        playground=playground_info,
+                        cluster=cluster_info,
+                        dml=dml_info,
+                        events=events,
+                    )
+                    return None
+                failed = True
+                trace["errors"].append({"stage": "completion", "error": reason})
+
         if failed:
             if use_playground:
                 playground_info["ready_for_removal"] = True
@@ -760,6 +1097,7 @@ def run_demo_stream(
                     playground=playground_info,
                     cluster=cluster_info,
                     dml=dml_info,
+                    events=events,
                 )
             if use_cluster:
                 cluster_info["ready_for_removal"] = True
@@ -795,9 +1133,10 @@ def run_demo_stream(
                 playground=playground_info,
                 cluster=cluster_info,
                 dml=dml_info,
+                events=events,
             )
             extra_context = _build_extra_context(stage_name)
-            max_tokens = 384 if fast else 640
+            max_tokens = 512 if fast else 1024
             system_messages = _build_system_messages(stage_name)
             try:
                 _, result, elapsed_ms = _call_agent_timed(stage_name, extra_context, system_messages, max_tokens)
@@ -846,13 +1185,14 @@ def run_demo_stream(
                 playground=playground_info,
                 cluster=cluster_info,
                 dml=dml_info,
+                events=events,
             )
             tool_context_snapshot = list(tool_context_chunks)
             shared_context = _build_extra_context(batch[0], tool_context_snapshot=tool_context_snapshot)
             futures = {}
             with ThreadPoolExecutor(max_workers=len(batch)) as executor:
                 for name in batch:
-                    max_tokens = 384 if fast else 640
+                    max_tokens = 512 if fast else 1024
                     system_messages = _build_system_messages(name)
                     futures[name] = executor.submit(_call_agent_timed, name, shared_context, system_messages, max_tokens)
             results: Dict[str, Dict[str, Any]] = {}
@@ -864,7 +1204,7 @@ def run_demo_stream(
                         "result": result,
                         "elapsed_ms": elapsed_ms,
                         "system_messages": stage_system_messages,
-                        "max_tokens": 384 if fast else 640,
+                        "max_tokens": 512 if fast else 1024,
                         "error": None,
                     }
                 except Exception as exc:  # noqa: BLE001
@@ -872,7 +1212,7 @@ def run_demo_stream(
                         "result": AgentResult(name, ""),
                         "elapsed_ms": 0.0,
                         "system_messages": _build_system_messages(name),
-                        "max_tokens": 384 if fast else 640,
+                        "max_tokens": 512 if fast else 1024,
                         "error": str(exc),
                     }
 
@@ -897,7 +1237,7 @@ def run_demo_stream(
                     elapsed_ms = (time.perf_counter() - start_time) * 1000
                     entry = results.get(name, {})
                     stage_system_messages = entry.get("system_messages", [])
-                    stage_max_tokens = entry.get("max_tokens", 384 if fast else 640)
+                    stage_max_tokens = entry.get("max_tokens", 512 if fast else 1024)
                     trace["stages"][name] = {
                         "output": "",
                         "error": str(exc),
@@ -936,14 +1276,15 @@ def run_demo_stream(
             playground=playground_info,
             cluster=cluster_info,
             dml=dml_info,
+            events=events,
         )
 
         stage_start = time.perf_counter()
         try:
             extra_context = _build_extra_context(stage_name)
-            max_tokens = 384 if fast else 640
+            max_tokens = 512 if fast else 1024
             if stage_name == "aggregator":
-                max_tokens = 320 if fast else 512
+                max_tokens = 384 if fast else 768
             system_messages = _build_system_messages(stage_name)
             result = call_agent(
                 stage_name,
@@ -1021,6 +1362,7 @@ def run_demo_stream(
                     playground=playground_info,
                     cluster=cluster_info,
                     dml=dml_info,
+                    events=events,
                 )
                 if validation.get("ok"):
                     break
@@ -1047,9 +1389,10 @@ def run_demo_stream(
                 for request in tool_requests:
                     tool_name = request.get("tool")
                     entry = {}
-                    if tool_name == "playground.exec" and use_playground:
+                    if tool_name in {"playground.exec", "playground.exec_detached"} and use_playground:
                         cmd = request.get("cmd")
                         timeout_s = int(request.get("timeout_s", 60))
+                        detach = bool(request.get("detach")) or tool_name == "playground.exec_detached"
                         if not isinstance(cmd, list) or not all(isinstance(arg, str) for arg in cmd):
                             entry = {
                                 "cmd": str(cmd),
@@ -1058,8 +1401,46 @@ def run_demo_stream(
                                 "stderr": "Invalid command format. Expected list[str].",
                             }
                         else:
-                            entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
+                            if detach:
+                                entry = playground_manager.exec_cmd_detached(playground_name, cmd)
+                            else:
+                                entry = playground_manager.exec_cmd(playground_name, cmd, timeout_s=timeout_s)
                             entry["cmd"] = " ".join(cmd)
+                        entry["agent"] = "fixer"
+                        tool_context_chunks.append(_format_tool_context(entry))
+                        playground_log.append(entry)
+                    elif tool_name == "playground.expose_port" and use_playground:
+                        host_port = request.get("host_port") or request.get("port")
+                        container_port = request.get("container_port") or request.get("target_port") or host_port
+                        try:
+                            host_port = int(host_port)
+                            container_port = int(container_port)
+                        except (TypeError, ValueError):
+                            entry = {
+                                "cmd": f"expose_port {host_port}:{container_port}",
+                                "exit_code": 125,
+                                "stdout": "",
+                                "stderr": "Invalid port values. Expected integers.",
+                            }
+                        else:
+                            result = playground_manager.expose_port(playground_name, host_port, container_port)
+                            if result.get("ok"):
+                                playground_info["web_port"] = host_port
+                                events.append(f"Port {host_port} exposed to playground {playground_name}.")
+                                entry = {
+                                    "cmd": f"expose_port {host_port}:{container_port}",
+                                    "exit_code": 0,
+                                    "stdout": json.dumps(result),
+                                    "stderr": "",
+                                }
+                            else:
+                                entry = {
+                                    "cmd": f"expose_port {host_port}:{container_port}",
+                                    "exit_code": 1,
+                                    "stdout": "",
+                                    "stderr": result.get("error", "Failed to expose port."),
+                                }
+                        entry["agent"] = "fixer"
                         tool_context_chunks.append(_format_tool_context(entry))
                         playground_log.append(entry)
                     elif tool_name == "playground.write_file" and use_playground:
@@ -1075,6 +1456,7 @@ def run_demo_stream(
                         else:
                             entry = playground_manager.write_file(playground_name, path, content)
                             entry["cmd"] = f"write_file {path}"
+                        entry["agent"] = "fixer"
                         tool_context_chunks.append(_format_tool_context(entry))
                         playground_log.append(entry)
                     elif tool_name == "cluster.exec" and use_cluster:
@@ -1091,6 +1473,7 @@ def run_demo_stream(
                         else:
                             entry = cluster_manager.exec_in(container, cmd, timeout_s=timeout_s)
                             entry["cmd"] = f"{container} :: {' '.join(cmd)}"
+                        entry["agent"] = "fixer"
                         tool_context_chunks.append(_format_cluster_context(entry))
                         cluster_log.append(entry)
                     elif tool_name == "cluster.logs" and use_cluster:
@@ -1110,6 +1493,7 @@ def run_demo_stream(
                                 tail = 200
                             entry = cluster_manager.container_logs(container, tail=tail)
                             entry["cmd"] = f"{container} :: logs (tail={tail})"
+                        entry["agent"] = "fixer"
                         tool_context_chunks.append(_format_cluster_context(entry))
                         cluster_log.append(entry)
                     else:
@@ -1143,6 +1527,7 @@ def run_demo_stream(
                     playground=playground_info,
                     cluster=cluster_info,
                     dml=dml_info,
+                    events=events,
                 )
             trace["cluster"]["fix_iterations"] = fix_iterations
             if last_validation and not last_validation.get("ok") and not failed:
@@ -1220,6 +1605,7 @@ def run_demo_stream(
         playground=playground_info,
         cluster=cluster_info,
         dml=dml_info,
+        events=events,
     )
 
 

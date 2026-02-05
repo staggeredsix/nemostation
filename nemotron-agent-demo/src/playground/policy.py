@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import List, Tuple
 
@@ -8,7 +9,7 @@ SAFE_WORKSPACE_ROOT = "/workspace/agent_projects"
 MAX_OUTPUT_BYTES = 200_000
 DEFAULT_COMMAND_TIMEOUT_S = 120
 CONTAINER_PREFIX = "nemotron-playground-"
-PLAYGROUND_USER = "1000:1000"
+PLAYGROUND_USER = os.getenv("PLAYGROUND_USER", "0:0")
 
 ALLOWLIST = {
     "bash",

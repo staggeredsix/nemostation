@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -25,6 +26,8 @@ from llm_client import fetch_available_model_names, ping_vllm
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CSS_PATH = STATIC_DIR / "style.css"
+BASE_DIR = Path(__file__).resolve().parents[2]
+HUMAN_INPUT_PATH = BASE_DIR / "prompt_library" / "human_input.json"
 
 DOCKER_PLAYGROUND_WARNING = (
     "<div class='banner warning'>Playground requires Docker CLI + /var/run/docker.sock mount.</div>"
@@ -257,6 +260,8 @@ def render_playground_status(state: Dict) -> str:
     requested_image = playground.get("requested_image")
     workspace_host = playground.get("workspace_host")
     workspace_container = playground.get("workspace_container")
+    web_port = playground.get("web_port")
+    web_url_html = f"<div>Web URL: http://localhost:{web_port}</div>" if web_port else ""
     warning_html = f"<div class='banner warning'>{warning}</div>" if warning else ""
     error_html = f"<div class='memory-error'>Error: {error}</div>" if error else ""
     requested_html = ""
@@ -278,6 +283,7 @@ def render_playground_status(state: Dict) -> str:
         f"<div>Container: {playground.get('name')}</div>"
         f"<div>Image: {image}</div>"
         f"{requested_html}"
+        f"{web_url_html}"
         f"{workspace_html}"
         f"{error_html}"
         "</div>"
@@ -421,8 +427,96 @@ def render_tool_activity(state: Dict) -> str:
     return "<div class='card'><h3>Tool activity</h3>" + "".join(rows) + "</div>"
 
 
+def _load_human_messages() -> List[str]:
+    try:
+        raw = HUMAN_INPUT_PATH.read_text()
+    except FileNotFoundError:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, list):
+        return []
+    messages: List[str] = []
+    for item in payload:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            messages.append(text)
+    return messages
+
+
+def _save_human_messages(messages: List[str]) -> None:
+    HUMAN_INPUT_PATH.parent.mkdir(exist_ok=True)
+    HUMAN_INPUT_PATH.write_text(json.dumps(messages, indent=2))
+
+
+def _format_tool_observation(entry: Dict[str, str], source: str) -> str:
+    cmd = (entry.get("cmd") or "").strip()
+    tool = (entry.get("tool") or "").strip()
+    agent = (entry.get("agent") or "").strip().lower()
+    exit_code = entry.get("exit_code")
+    if agent in {"planner", "coder", "reviewer", "ops", "aggregator", "fixer"}:
+        agent_label = f"{agent.title()} agent"
+    elif agent:
+        agent_label = agent.title()
+    else:
+        agent_label = "System"
+
+    if tool == "cluster.validate":
+        status = "OK" if exit_code == 0 else "FAIL"
+        return f"{agent_label} ran cluster validation ({status})."
+    if tool == "cluster.logs":
+        return f"{agent_label} fetched cluster logs."
+    if tool == "playground.exec_detached":
+        return f"{agent_label} started a detached command."
+    if tool == "playground.expose_port":
+        return f"{agent_label} exposed a port to the host."
+    if cmd.startswith("write_file "):
+        path = cmd.replace("write_file ", "", 1).strip()
+        return f"{agent_label} wrote file {path}."
+    if cmd.startswith("docker "):
+        return f"{agent_label} ran docker: {cmd}."
+    if cmd:
+        return f"{agent_label} executed: {cmd}."
+    return f"{agent_label} ran a {source} tool."
+
+
+def render_observations(observations: List[str]) -> str:
+    import html
+
+    if not observations:
+        return "<div class='card'><h3>Observations</h3><div class='tool-empty'>No observations yet.</div></div>"
+    rows = []
+    for line in observations[-200:]:
+        rows.append(f"<div class='obs-row'>• {html.escape(line)}</div>")
+    return "<div class='card'><h3>Observations</h3><div class='obs-feed'>" + "".join(rows) + "</div></div>"
+
+
 def _default_prompt_source() -> str:
     return "<div class='prompt-source'><span class='label'>Prompt source:</span> typed</div>"
+
+
+def load_human_chat() -> List[tuple[str, str]]:
+    return [(msg, "") for msg in _load_human_messages()]
+
+
+def add_human_message(message: str, history: List[tuple[str, str]]) -> tuple:
+    text = (message or "").strip()
+    if not text:
+        return gr.update(value=""), history
+    messages = _load_human_messages()
+    messages.append(text)
+    _save_human_messages(messages)
+    history = history + [(text, "")]
+    return gr.update(value=""), history
+
+
+def clear_human_messages() -> tuple:
+    _save_human_messages([])
+    return [], gr.update(value="")
 
 
 def stream_runner(
@@ -441,6 +535,13 @@ def stream_runner(
 ):
     if not ping_server():
         raise gr.Error("Server not ready at /v1/models. Start docker compose first.")
+
+    observations: List[str] = []
+    stage_status: Dict[str, str] = {}
+    last_playground_log = 0
+    last_cluster_log = 0
+    last_human_count = 0
+    last_event_count = 0
 
     for state in run_demo_stream(
         goal,
@@ -464,6 +565,44 @@ def stream_runner(
         ingest_panel = render_ingest_panel(state)
         playground_status = render_playground_status(state)
         tool_activity = render_tool_activity(state)
+        stages = state.get("stages", []) or []
+        for stage in stages:
+            name = str(stage.get("name", "")).strip() or "Agent"
+            status = str(stage.get("status", "")).lower()
+            key = name.lower()
+            prev = stage_status.get(key)
+            if prev != status and status:
+                if status == "running":
+                    observations.append(f"{name} agent started.")
+                elif status == "done":
+                    observations.append(f"{name} agent finished.")
+                elif status == "failed":
+                    error = stage.get("error") or "error"
+                    observations.append(f"{name} agent failed: {error}.")
+            stage_status[key] = status
+
+        playground_log = state.get("playground", {}).get("log", []) or []
+        for entry in playground_log[last_playground_log:]:
+            observations.append(_format_tool_observation(entry, "playground"))
+        last_playground_log = len(playground_log)
+
+        cluster_log = state.get("cluster", {}).get("log", []) or []
+        for entry in cluster_log[last_cluster_log:]:
+            observations.append(_format_tool_observation(entry, "cluster"))
+        last_cluster_log = len(cluster_log)
+
+        human_messages = _load_human_messages()
+        for message in human_messages[last_human_count:]:
+            observations.append(f"Human input: {message}")
+        last_human_count = len(human_messages)
+        event_messages = state.get("events", []) or []
+        for message in event_messages[last_event_count:]:
+            observations.append(str(message))
+        last_event_count = len(event_messages)
+        if len(observations) > 400:
+            observations = observations[-400:]
+        observation_html = render_observations(observations)
+
         cluster_status = render_cluster_status(state)
         cluster_validation = render_cluster_validation(state)
         playground_name = state.get("playground", {}).get("name", "")
@@ -498,6 +637,7 @@ def stream_runner(
             playground_workspace_host,
             playground_workspace_container,
             tool_activity,
+            observation_html,
             remove_btn_update,
             delete_btn_update,
             playground_name,
@@ -522,19 +662,30 @@ def build_ui() -> gr.Blocks:
                 with gr.Row():
                     goal = gr.Textbox(label="Goal", value="Create a demo plan for a local agent stack", lines=3, scale=4)
                     prompt_source = gr.HTML(value=_default_prompt_source(), scale=1)
-                scenario = gr.Dropdown(
-                    label="Scenario",
-                    choices=[
-                        "Optimize inference for latency",
-                        "Ship a resilient offline demo",
-                        "Benchmark throughput on GB300",
-                    ],
-                    value="Optimize inference for latency",
-                )
+                with gr.Accordion("Goal Presets", open=False):
+                    presets_state = gr.State(load_goal_presets())
+                    with gr.Row():
+                        preset_dropdown = gr.Dropdown(
+                            label="Preset",
+                            choices=[p["name"] for p in presets_state.value],
+                            value=presets_state.value[0]["name"] if presets_state.value else None,
+                        )
+                        unsaved_indicator = gr.HTML(value="")
+                    preset_content = gr.Textbox(label="Preset content", lines=5)
+                    preset_status = gr.Markdown(value="")
+                    with gr.Row():
+                        push_goal_btn = gr.Button("Push to Goal Input", variant="primary")
+                        save_preset_btn = gr.Button("Save Preset")
+                        save_new_btn = gr.Button("Save as New")
+                    with gr.Row():
+                        new_name = gr.Textbox(label="New preset name", placeholder="Enter name for new preset")
+                        delete_confirm = gr.Checkbox(label="Confirm delete")
+                        delete_btn = gr.Button("Delete Preset", variant="stop")
+                scenario_state = gr.State("")
                 fast = gr.Checkbox(label="Fast mode (skip Ops, fewer tokens)")
                 use_dml = gr.Checkbox(label="DML Memory ON / OFF")
                 dml_top_k = gr.Slider(label="DML top_k", minimum=1, maximum=10, step=1, value=6, visible=False)
-                use_playground = gr.Checkbox(label="Use Playground Container", value=False)
+                use_playground = gr.Checkbox(label="Use Playground Container", value=True)
                 playground_image = gr.Textbox(label="Playground image", value="nemotron-playground:latest", visible=False)
                 auto_remove_playground = gr.Checkbox(label="Auto-remove container after run", value=False, visible=False)
                 use_cluster = gr.Checkbox(label="Use Cluster Playground", value=False)
@@ -555,6 +706,12 @@ def build_ui() -> gr.Blocks:
                 remove_status = gr.Markdown(value="")
                 delete_status = gr.Markdown(value="")
                 delete_cluster_status = gr.Markdown(value="")
+                gr.Markdown("Human Input")
+                human_chat = gr.Chatbot(label="Human Input", height=200)
+                human_input = gr.Textbox(label="Message", lines=2, placeholder="Share guidance for the agents...")
+                with gr.Row():
+                    send_human_btn = gr.Button("Send")
+                    clear_human_btn = gr.Button("Clear")
             with gr.Column(scale=2):
                 cookbook_panel = gr.HTML(elem_classes=["card", "scroll-panel"])
                 ingest_panel = gr.HTML(elem_classes=["card", "scroll-panel"])
@@ -578,7 +735,8 @@ def build_ui() -> gr.Blocks:
                         playground_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
                         playground_workspace_container = gr.Textbox(label="Container workspace path", interactive=False)
                     gr.Markdown("Playground command execution log (truncated).")
-                tool_activity = gr.HTML()
+                tool_activity = gr.HTML(elem_classes=["scroll-panel"])
+                observations_box = gr.HTML()
                 with gr.Tab("Cluster"):
                     with gr.Row():
                         cluster_workspace_host = gr.Textbox(label="Host workspace path", interactive=False)
@@ -587,38 +745,21 @@ def build_ui() -> gr.Blocks:
                     cluster_validation = gr.Textbox(label="Cluster validation", lines=10, elem_classes=["text-panel"])
 
         with gr.Tab("Prompts"):
-            with gr.Tab("Goal Presets"):
-                presets_state = gr.State(load_goal_presets())
-                with gr.Row():
-                    preset_dropdown = gr.Dropdown(label="Preset", choices=[p["name"] for p in presets_state.value], value=presets_state.value[0]["name"] if presets_state.value else None)
-                    unsaved_indicator = gr.HTML(value="")
-                preset_content = gr.Textbox(label="Preset content", lines=5)
-                preset_status = gr.Markdown(value="")
-                with gr.Row():
-                    push_goal_btn = gr.Button("Push to Goal Input", variant="primary")
-                    save_preset_btn = gr.Button("Save Preset")
-                    save_new_btn = gr.Button("Save as New")
-                with gr.Row():
-                    new_name = gr.Textbox(label="New preset name", placeholder="Enter name for new preset")
-                    delete_confirm = gr.Checkbox(label="Confirm delete")
-                    delete_btn = gr.Button("Delete Preset", variant="stop")
-
-            with gr.Tab("Agent Prompts"):
-                agent_dropdown = gr.Dropdown(
-                    label="Agent",
-                    choices=["system", "planner", "coder", "reviewer", "ops", "aggregator", "fixer"],
-                    value="system",
-                )
-                badge_holder = gr.HTML(value="")
-                diff_text = gr.Markdown(value="")
-                with gr.Row():
-                    default_prompt = gr.Textbox(label="Default Prompt (read-only)", lines=10, interactive=False)
-                    active_prompt = gr.Textbox(label="Active Prompt (editable)", lines=10, interactive=True)
-                agent_status = gr.Markdown(value="")
-                with gr.Row():
-                    use_default_btn = gr.Button("Use Default")
-                    save_override_btn = gr.Button("Save Override", variant="primary")
-                    push_live_btn = gr.Button("Push Override Live")
+            agent_dropdown = gr.Dropdown(
+                label="Agent",
+                choices=["system", "planner", "coder", "reviewer", "ops", "aggregator", "fixer"],
+                value="system",
+            )
+            badge_holder = gr.HTML(value="")
+            diff_text = gr.Markdown(value="")
+            with gr.Row():
+                default_prompt = gr.Textbox(label="Default Prompt (read-only)", lines=10, interactive=False)
+                active_prompt = gr.Textbox(label="Active Prompt (editable)", lines=10, interactive=True)
+            agent_status = gr.Markdown(value="")
+            with gr.Row():
+                use_default_btn = gr.Button("Use Default")
+                save_override_btn = gr.Button("Save Override", variant="primary")
+                push_live_btn = gr.Button("Push Override Live")
 
         def update_goal_source(_: str) -> str:
             return _default_prompt_source()
@@ -826,6 +967,7 @@ def build_ui() -> gr.Blocks:
 
         demo.load(fn=docker_status_banner, inputs=None, outputs=docker_banner)
         demo.load(fn=update_status, inputs=None, outputs=server_status)
+        demo.load(fn=load_human_chat, inputs=None, outputs=human_chat)
 
         demo.load(fn=load_presets, inputs=None, outputs=[presets_state, preset_dropdown, preset_content, unsaved_indicator, preset_status, new_name])
         demo.load(fn=load_agent, inputs=agent_dropdown, outputs=[default_prompt, active_prompt, badge_holder, diff_text, agent_status])
@@ -838,6 +980,9 @@ def build_ui() -> gr.Blocks:
         push_goal_btn.click(fn=push_goal, inputs=[preset_content, preset_dropdown], outputs=[goal, prompt_source])
 
         goal.input(fn=update_goal_source, inputs=goal, outputs=prompt_source)
+
+        send_human_btn.click(fn=add_human_message, inputs=[human_input, human_chat], outputs=[human_input, human_chat])
+        clear_human_btn.click(fn=clear_human_messages, inputs=None, outputs=[human_chat, human_input])
 
         agent_dropdown.change(fn=load_agent, inputs=agent_dropdown, outputs=[default_prompt, active_prompt, badge_holder, diff_text, agent_status])
         active_prompt.change(fn=update_diff, inputs=[active_prompt, agent_dropdown], outputs=[badge_holder, diff_text])
@@ -857,7 +1002,7 @@ def build_ui() -> gr.Blocks:
             fn=stream_runner,
             inputs=[
                 goal,
-                scenario,
+                scenario_state,
                 fast,
                 use_dml,
                 dml_top_k,
@@ -887,6 +1032,7 @@ def build_ui() -> gr.Blocks:
                 playground_workspace_host,
                 playground_workspace_container,
                 tool_activity,
+                observations_box,
                 remove_playground_btn,
                 delete_workspace_btn,
                 playground_name_state,

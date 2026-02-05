@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import time
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -148,27 +149,33 @@ def _build_worker_names(prefix: str, count: int) -> List[str]:
 def _role_start_command(role: str, safe_dir: str) -> List[str]:
     if role == "api":
         launch = (
+            "while true; do "
             f"if [ -f {safe_dir}/api_service/main.py ]; then "
-            "python -m api_service.main; "
+            "exec python -m api_service.main; "
             f"elif [ -f {safe_dir}/api_service/app.py ]; then "
-            "python -m api_service.app; "
-            "else echo 'api_service entrypoint not found; sleeping.' >&2; sleep infinity; fi"
+            "exec python -m api_service.app; "
+            "else echo 'api_service entrypoint not found; waiting.' >&2; sleep 2; fi; "
+            "done"
         )
     elif role == "worker":
         launch = (
+            "while true; do "
             f"if [ -f {safe_dir}/worker_service/main.py ]; then "
-            "python -m worker_service.main; "
+            "exec python -m worker_service.main; "
             f"elif [ -f {safe_dir}/worker_service/app.py ]; then "
-            "python -m worker_service.app; "
-            "else echo 'worker_service entrypoint not found; sleeping.' >&2; sleep infinity; fi"
+            "exec python -m worker_service.app; "
+            "else echo 'worker_service entrypoint not found; waiting.' >&2; sleep 2; fi; "
+            "done"
         )
     elif role == "web":
         launch = (
+            "while true; do "
             f"if [ -f {safe_dir}/webui/app.py ]; then "
-            "python -m webui.app; "
+            "exec python -m webui.app; "
             f"elif [ -f {safe_dir}/webui/main.py ]; then "
-            "python -m webui.main; "
-            "else echo 'webui entrypoint not found; sleeping.' >&2; sleep infinity; fi"
+            "exec python -m webui.main; "
+            "else echo 'webui entrypoint not found; waiting.' >&2; sleep 2; fi; "
+            "done"
         )
     else:
         raise ValueError(f"Unsupported role: {role}")
@@ -232,10 +239,17 @@ def create_cluster(run_id: str, image: str, size: int, workspace_host: Optional[
     prefix = _cluster_prefix(run_id)
     network = _network_name(run_id)
     workspace_root = Path(workspace_host) if workspace_host else (WORKSPACE_ROOT / f"cluster-{run_id}")
-    agent_projects_root = AGENT_PROJECTS_ROOT / run_id
+    agent_projects_root = AGENT_PROJECTS_ROOT
     safe_dir = f"/workspace/agent_projects/{run_id}"
     workspace_root.mkdir(parents=True, exist_ok=True)
     agent_projects_root.mkdir(parents=True, exist_ok=True)
+    run_projects_root = agent_projects_root / run_id
+    run_projects_root.mkdir(parents=True, exist_ok=True)
+    for path in (workspace_root, agent_projects_root, run_projects_root):
+        try:
+            os.chmod(path, 0o777)
+        except PermissionError:
+            pass
     api_port = _port_for_run(run_id, API_HOST_PORT_BASE)
     web_port = _port_for_run(run_id, WEB_HOST_PORT_BASE)
     include_web = size >= 4
