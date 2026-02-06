@@ -38,6 +38,10 @@ ALLOWLIST = {
     "grep",
     "find",
     "docker",
+    "ssh",
+    "scp",
+    "rsync",
+    "kubectl",
 }
 
 DENY_PATTERNS: List[str] = []

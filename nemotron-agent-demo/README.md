@@ -1,6 +1,6 @@
 # Nemotron Station Agent Demo
 
-Agentic demo that drives a single LLM through planner/coder/reviewer/ops/aggregator roles and visualizes progress live.
+Agentic demo that drives a single LLM through supervisor/planner/coder/reviewer/ops/aggregator roles and visualizes progress live.
 
 Default model: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` via NVIDIA NIM.
 
@@ -32,11 +32,22 @@ docker compose --env-file creds.env -f docker-compose.yml -f docker-compose.nemo
 - `VLLM_BASE_URL` (default: `http://host.docker.internal:8000/v1`).
 - `VLLM_MODEL_ID` (default: `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4`).
 - `VLLM_TIMEOUT_S` (default: `120`).
+- Per-role overrides: `ROLE_BASE_URL_<ROLE>` (e.g., `ROLE_BASE_URL_SUPERVISOR`, `ROLE_BASE_URL_PLANNER`, `ROLE_BASE_URL_CODER`).
+- `PLAYGROUND_SSH_DIR` (optional): host path to mount into `/root/.ssh` for SSH deployments.
+- `PLAYGROUND_KUBECONFIG` (optional): host kubeconfig path mounted as `/root/.kube/config` for kubectl.
+- `PLAYGROUND_DOCKER_SOCK` (optional, `1`/`0`): mount `/var/run/docker.sock` into playground for Docker CLI.
+- `AGENT_MAX_ATTEMPTS` (default: `0` = unlimited retries until completion).
 
 **Health Checks**
 - NIM: `curl http://localhost:8000/v1/models`
 - UI: `http://localhost:7860`
 - DML: `curl http://localhost:9001/health`
+
+**Infrastructure Tools (Playground)**
+- `playground.expose_port` to publish container ports to the host.
+- `ssh`, `scp`, `rsync` available inside playground when `PLAYGROUND_SSH_DIR` is mounted.
+- `kubectl` available inside playground when `PLAYGROUND_KUBECONFIG` is mounted.
+- `playground.docker` supports `docker compose` subcommands: `up`, `down`, `ps`, `logs`, `build`, `pull`, `restart`, `stop`, `start`.
 
 **Local Run Without Containers (Legacy)**
 ```bash

@@ -13,9 +13,10 @@ from . import policy
 BASE_DIR = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = BASE_DIR / "playground_workspace"
 AGENT_PROJECTS_ROOT = BASE_DIR / "agent_projects"
-DOCKER_ALLOWED_COMMANDS = {"inspect", "start", "run", "exec", "rm", "build", "stop", "restart", "ps", "logs", "pull"}
+DOCKER_ALLOWED_COMMANDS = {"inspect", "start", "run", "exec", "rm", "build", "stop", "restart", "ps", "logs", "pull", "compose"}
 DOCKER_BLOCKED_COMMANDS = {"prune", "rmi"}
 DOCKER_BLOCKED_SUBCOMMANDS = {("system", "prune"), ("volume", "rm"), ("network", "rm"), ("image", "rm")}
+DOCKER_COMPOSE_ALLOWED_SUBCOMMANDS = {"up", "down", "ps", "logs", "build", "pull", "restart", "stop", "start"}
 ALLOWED_CONTAINER_PREFIXES = ("nemotron-playground-", "nemotron-play-")
 DEFAULT_PLAYGROUND_IMAGE = "nemotron-playground:latest"
 FALLBACK_PLAYGROUND_IMAGE = "python:3.11-slim"
@@ -86,6 +87,12 @@ def _validate_docker_args(args: List[str]) -> Tuple[bool, str | None]:
     cmd = args[0]
     if cmd not in DOCKER_ALLOWED_COMMANDS:
         return False, f"Docker command '{cmd}' is not allowed."
+    if cmd == "compose":
+        if len(args) < 2:
+            return False, "Docker compose requires a subcommand."
+        sub = args[1]
+        if sub not in DOCKER_COMPOSE_ALLOWED_SUBCOMMANDS:
+            return False, f"Docker compose subcommand '{sub}' is not allowed."
     if cmd == "run":
         if "--name" not in args:
             return False, "Docker run requires --name with an allowed prefix."
@@ -254,6 +261,15 @@ def ensure_playground(image: str, name: str, run_id: str, repo_mount: Optional[s
         "-v",
         f"{agent_projects_host}:/workspace/agent_projects",
     ]
+    ssh_dir = os.getenv("PLAYGROUND_SSH_DIR", "").strip()
+    if ssh_dir and Path(ssh_dir).expanduser().exists():
+        volume_args += ["-v", f"{Path(ssh_dir).expanduser().resolve()}:/root/.ssh:ro"]
+    kubeconfig = os.getenv("PLAYGROUND_KUBECONFIG", "").strip()
+    if kubeconfig and Path(kubeconfig).expanduser().exists():
+        volume_args += ["-v", f"{Path(kubeconfig).expanduser().resolve()}:/root/.kube/config:ro"]
+    if os.getenv("PLAYGROUND_DOCKER_SOCK", "0").strip().lower() in {"1", "true", "yes"}:
+        if Path("/var/run/docker.sock").exists():
+            volume_args += ["-v", "/var/run/docker.sock:/var/run/docker.sock"]
     if repo_mount:
         volume_args += ["-v", f"{Path(repo_mount).resolve()}:/workspace/app"]
 

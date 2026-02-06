@@ -252,7 +252,7 @@ def _build_stage_chunks(payload: RunReportRequest) -> List[str]:
     trace = payload.trace or {}
     stages = trace.get("stages", {}) if isinstance(trace, dict) else {}
     chunks: List[str] = []
-    ordered = ["planner", "coder", "reviewer", "ops", "aggregator"]
+    ordered = ["supervisor", "planner", "coder", "reviewer", "ops", "aggregator"]
     seen = set()
     for name in ordered:
         stage = stages.get(name)

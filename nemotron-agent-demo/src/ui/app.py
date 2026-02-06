@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import gradio as gr
+import inspect
 
 from src.demo.orchestrator import run_demo_stream
 from src.playground import cluster_manager
@@ -155,7 +156,7 @@ def render_metrics(state: Dict) -> str:
 def render_agent_outputs(state: Dict) -> Dict[str, str]:
     outputs: Dict[str, str] = {}
     stage_map = {stage.get("name", "").lower(): stage for stage in state.get("stages", [])}
-    for role in ("planner", "coder", "reviewer", "ops", "aggregator"):
+    for role in ("supervisor", "planner", "coder", "reviewer", "ops", "aggregator"):
         stage = stage_map.get(role)
         if not stage:
             outputs[role] = "Not run (stage disabled)."
@@ -458,7 +459,7 @@ def _format_tool_observation(entry: Dict[str, str], source: str) -> str:
     tool = (entry.get("tool") or "").strip()
     agent = (entry.get("agent") or "").strip().lower()
     exit_code = entry.get("exit_code")
-    if agent in {"planner", "coder", "reviewer", "ops", "aggregator", "fixer"}:
+    if agent in {"supervisor", "planner", "coder", "reviewer", "ops", "aggregator", "fixer"}:
         agent_label = f"{agent.title()} agent"
     elif agent:
         agent_label = agent.title()
@@ -499,24 +500,63 @@ def _default_prompt_source() -> str:
     return "<div class='prompt-source'><span class='label'>Prompt source:</span> typed</div>"
 
 
-def load_human_chat() -> List[tuple[str, str]]:
-    return [(msg, "") for msg in _load_human_messages()]
+def _chatbot_supports_messages() -> bool:
+    try:
+        sig = inspect.signature(gr.Chatbot.__init__)
+        return "type" in sig.parameters
+    except (TypeError, ValueError):
+        return False
 
 
-def add_human_message(message: str, history: List[tuple[str, str]]) -> tuple:
+CHATBOT_USES_MESSAGES = _chatbot_supports_messages()
+
+
+def _build_chat_history(human_messages: List[str], supervisor_reply: str | None = None):
+    if CHATBOT_USES_MESSAGES:
+        history: List[Dict[str, str]] = [{"role": "user", "content": msg} for msg in human_messages]
+        if supervisor_reply:
+            history.append({"role": "assistant", "content": supervisor_reply})
+        return history
+    history: List[tuple[str, str]] = [(msg, "") for msg in human_messages]
+    if supervisor_reply:
+        if history:
+            history[-1] = (history[-1][0], supervisor_reply)
+        else:
+            history.append(("", supervisor_reply))
+    return history
+
+
+def load_human_chat():
+    return _build_chat_history(_load_human_messages())
+
+
+def add_human_message(message: str, history) -> tuple:
     text = (message or "").strip()
     if not text:
         return gr.update(value=""), history
     messages = _load_human_messages()
     messages.append(text)
     _save_human_messages(messages)
-    history = history + [(text, "")]
+    history = list(history or [])
+    if CHATBOT_USES_MESSAGES:
+        history.append({"role": "user", "content": text})
+    else:
+        history.append((text, ""))
     return gr.update(value=""), history
 
 
 def clear_human_messages() -> tuple:
     _save_human_messages([])
     return [], gr.update(value="")
+
+
+def _build_supervisor_chat(state: Dict, human_messages: List[str]):
+    stage_map = {stage.get("name", "").lower(): stage for stage in state.get("stages", [])}
+    supervisor = stage_map.get("supervisor", {}) if stage_map else {}
+    status = str(supervisor.get("status", "")).lower()
+    output = supervisor.get("output") or ""
+    reply = output if status == "done" and output else None
+    return _build_chat_history(human_messages, supervisor_reply=reply)
 
 
 def stream_runner(
@@ -595,6 +635,7 @@ def stream_runner(
         for message in human_messages[last_human_count:]:
             observations.append(f"Human input: {message}")
         last_human_count = len(human_messages)
+        supervisor_chat = _build_supervisor_chat(state, human_messages)
         event_messages = state.get("events", []) or []
         for message in event_messages[last_event_count:]:
             observations.append(str(message))
@@ -624,6 +665,7 @@ def stream_runner(
             timeline_html,
             cookbook_panel,
             ingest_panel,
+            outputs.get("supervisor", ""),
             outputs.get("planner", ""),
             outputs.get("coder", ""),
             outputs.get("reviewer", ""),
@@ -638,6 +680,7 @@ def stream_runner(
             playground_workspace_container,
             tool_activity,
             observation_html,
+            supervisor_chat,
             remove_btn_update,
             delete_btn_update,
             playground_name,
@@ -695,6 +738,7 @@ def build_ui() -> gr.Blocks:
                 validate_cluster_btn = gr.Button("Run Validation", visible=False)
                 destroy_cluster_btn = gr.Button("Destroy Cluster", variant="stop", visible=False)
                 run_btn = gr.Button("Run Demo", variant="primary")
+                stop_btn = gr.Button("Stop Run", variant="stop")
                 server_status = gr.HTML("", label="Server status")
                 playground_status = gr.HTML("", label="Playground status")
                 cluster_status = gr.HTML("", label="Cluster status")
@@ -706,9 +750,16 @@ def build_ui() -> gr.Blocks:
                 remove_status = gr.Markdown(value="")
                 delete_status = gr.Markdown(value="")
                 delete_cluster_status = gr.Markdown(value="")
-                gr.Markdown("Human Input")
-                human_chat = gr.Chatbot(label="Human Input", height=200)
-                human_input = gr.Textbox(label="Message", lines=2, placeholder="Share guidance for the agents...")
+                gr.Markdown("Supervisor Chat")
+                if CHATBOT_USES_MESSAGES:
+                    human_chat = gr.Chatbot(label="Supervisor Chat", height=200, type="messages")
+                else:
+                    human_chat = gr.Chatbot(label="Supervisor Chat", height=200)
+                human_input = gr.Textbox(
+                    label="Message to Supervisor",
+                    lines=2,
+                    placeholder="Share executive guidance or answer supervisor questions...",
+                )
                 with gr.Row():
                     send_human_btn = gr.Button("Send")
                     clear_human_btn = gr.Button("Clear")
@@ -719,6 +770,7 @@ def build_ui() -> gr.Blocks:
                     metrics_card = gr.HTML()
                     timeline = gr.HTML(elem_classes=["card", "scroll-panel"])
                 with gr.Tab("Agent Outputs"):
+                    supervisor_box = gr.Textbox(label="Supervisor", lines=6, elem_classes=["text-panel"])
                     planner_box = gr.Textbox(label="Planner", lines=6, elem_classes=["text-panel"])
                     coder_box = gr.Textbox(label="Coder", lines=6, elem_classes=["text-panel"])
                     reviewer_box = gr.Textbox(label="Reviewer", lines=6, elem_classes=["text-panel"])
@@ -747,7 +799,7 @@ def build_ui() -> gr.Blocks:
         with gr.Tab("Prompts"):
             agent_dropdown = gr.Dropdown(
                 label="Agent",
-                choices=["system", "planner", "coder", "reviewer", "ops", "aggregator", "fixer"],
+                choices=["system", "supervisor", "planner", "coder", "reviewer", "ops", "aggregator", "fixer"],
                 value="system",
             )
             badge_holder = gr.HTML(value="")
@@ -998,7 +1050,7 @@ def build_ui() -> gr.Blocks:
             outputs=[cluster_size, cluster_image, create_cluster_btn, validate_cluster_btn, destroy_cluster_btn],
         )
 
-        run_btn.click(
+        run_event = run_btn.click(
             fn=stream_runner,
             inputs=[
                 goal,
@@ -1019,6 +1071,7 @@ def build_ui() -> gr.Blocks:
                 timeline,
                 cookbook_panel,
                 ingest_panel,
+                supervisor_box,
                 planner_box,
                 coder_box,
                 reviewer_box,
@@ -1033,6 +1086,7 @@ def build_ui() -> gr.Blocks:
                 playground_workspace_container,
                 tool_activity,
                 observations_box,
+                human_chat,
                 remove_playground_btn,
                 delete_workspace_btn,
                 playground_name_state,
@@ -1047,6 +1101,7 @@ def build_ui() -> gr.Blocks:
             ],
             show_progress=False,
         )
+        stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[run_event])
 
         remove_playground_btn.click(
             fn=remove_playground_container,

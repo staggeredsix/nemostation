@@ -36,10 +36,14 @@ class StageState:
     error: Optional[str] = None
 
 
-DEFAULT_STAGES = ["planner", "coder", "reviewer", "ops", "aggregator"]
+DEFAULT_STAGES = ["supervisor", "planner", "coder", "reviewer", "ops", "aggregator"]
 LONG_RUN_MARKER = "LONG_AGENT_RUN_MODE: true"
 GIVE_UP_PHRASE = "we cannot complete the task"
 HANDOFF_RE = re.compile(r"^\s*(?:NEXT_ROLE|HANDOFF_TO)\s*:\s*(\w+)\s*$", re.IGNORECASE | re.MULTILINE)
+HUMAN_INPUT_REQUIRED_RE = re.compile(
+    r"^\s*HUMAN_INPUT_REQUIRED\s*:\s*(.+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
 FIXED_PLAYGROUND_COMMANDS = {
     "coder": ["bash", "-lc", "ls -la /workspace && python --version"],
     "aggregator": ["bash", "-lc", "find /workspace -maxdepth 3 -type f | head -n 50"],
@@ -81,6 +85,72 @@ def _should_autobuild_webserver(goal: str) -> bool:
     return False
 
 
+def _requires_project_scaffold(goal: str, scenario: Optional[str]) -> bool:
+    text = f"{goal} {scenario or ''}".lower()
+    if LONG_RUN_MARKER.lower() in text:
+        return True
+    return bool(
+        re.search(
+            r"\\b(app|service|api|server|website|web|frontend|backend|docker|compose|container|microservice|project|ui)\\b",
+            text,
+        )
+    )
+
+
+def _extract_human_input_requests(output: str) -> List[str]:
+    if not output:
+        return []
+    return [match.strip() for match in HUMAN_INPUT_REQUIRED_RE.findall(output) if match.strip()]
+
+
+def _format_access_summary(
+    run_id: str,
+    playground_info: Dict[str, Any],
+    cluster_info: Dict[str, Any],
+) -> str:
+    lines: List[str] = []
+    lines.append("Access summary:")
+    lines.append(f"- Run ID: {run_id}")
+    lines.append(f"- Project path (host): {BASE_DIR / 'agent_projects' / run_id}")
+
+    if playground_info.get("enabled"):
+        lines.append(f"- Playground container: {playground_info.get('name') or '—'}")
+        if playground_info.get("workspace_host") or playground_info.get("workspace_container"):
+            lines.append(f"- Playground workspace (host): {playground_info.get('workspace_host') or '—'}")
+            lines.append(f"- Playground workspace (container): {playground_info.get('workspace_container') or '—'}")
+        exposed_ports = playground_info.get("exposed_ports") or []
+        if exposed_ports:
+            lines.append(f"- Playground exposed ports: {', '.join(str(p) for p in exposed_ports)}")
+        web_port = playground_info.get("web_port")
+        if web_port:
+            lines.append(f"- Playground web URL: http://localhost:{web_port}")
+        else:
+            lines.append("- Playground web URL: not exposed (use playground.expose_port)")
+
+    if cluster_info.get("enabled"):
+        lines.append(f"- Cluster run ID: {cluster_info.get('run_id') or run_id}")
+        lines.append(f"- Cluster network: {cluster_info.get('network') or '—'}")
+        containers = ", ".join([c.get("name", "") for c in cluster_info.get("containers", [])]) or "—"
+        lines.append(f"- Cluster containers: {containers}")
+        api_port = cluster_info.get("api_port")
+        web_port = cluster_info.get("web_port")
+        lines.append(f"- Cluster API URL: {f'http://localhost:{api_port}' if api_port else '—'}")
+        lines.append(f"- Cluster Web URL: {f'http://localhost:{web_port}' if web_port else '—'}")
+        if cluster_info.get("workspace_host") or cluster_info.get("workspace_container"):
+            lines.append(f"- Cluster workspace (host): {cluster_info.get('workspace_host') or '—'}")
+            lines.append(f"- Cluster workspace (container): {cluster_info.get('workspace_container') or '—'}")
+
+    return "\n".join(lines)
+
+
+def _format_human_input_block(requests: List[str]) -> str:
+    if not requests:
+        return ""
+    lines = ["HUMAN INPUT REQUIRED:"]
+    lines.extend([f"- {item}" for item in requests if item])
+    return "\n".join(lines)
+
+
 def _write_stage_artifact(run_id: str, stage_name: str, content: str) -> Optional[str]:
     try:
         run_root = BASE_DIR / "agent_projects" / run_id / "outputs"
@@ -98,7 +168,7 @@ def _write_stage_artifact(run_id: str, stage_name: str, content: str) -> Optiona
 
 
 def _initial_state(goal: str, scenario: Optional[str], fast: bool) -> Dict:
-    stage_order = ["planner", "coder", "reviewer"]
+    stage_order = ["supervisor", "planner", "coder", "reviewer"]
     if not fast:
         stage_order.append("ops")
     stage_order.append("aggregator")
@@ -241,7 +311,7 @@ def _extract_handoff(output: str) -> Optional[str]:
     if not match:
         return None
     role = match.group(1).strip().lower()
-    if role in {"planner", "coder", "reviewer", "ops", "aggregator"}:
+    if role in {"supervisor", "planner", "coder", "reviewer", "ops", "aggregator"}:
         return role
     return None
 
@@ -287,7 +357,7 @@ def run_demo_stream(
     parallel_agents: Optional[bool] = None,
 ) -> Generator[Dict, None, None]:
     stages: List[StageState] = []
-    stage_order = ["planner", "coder", "reviewer"]
+    stage_order = ["supervisor", "planner", "coder", "reviewer"]
     if not fast:
         stage_order.append("ops")
     stage_order.append("aggregator")
@@ -309,7 +379,7 @@ def run_demo_stream(
         readme_path.write_text("Initialized by Nemotron Station run.\n")
     long_run_mode = _is_long_run(goal, scenario)
     attempt = 1
-    max_attempts = int(os.getenv("AGENT_MAX_ATTEMPTS", "3"))
+    max_attempts = int(os.getenv("AGENT_MAX_ATTEMPTS", "0"))
     playground_name = f"nemotron-playground-{run_id.split('-')[0]}"
     playground_log: List[Dict[str, Any]] = []
     playground_info: Dict[str, Any] = {
@@ -330,7 +400,10 @@ def run_demo_stream(
     tool_context_chunks: List[str] = []
     events: List[str] = []
     events.append(f"Run ID: {run_id}")
-    events.append(f"Attempt {attempt} of {max_attempts}")
+    if max_attempts == 0:
+        events.append(f"Attempt {attempt} (unlimited retries)")
+    else:
+        events.append(f"Attempt {attempt} of {max_attempts}")
     if not use_playground and not use_cluster:
         events.append("Playground/Cluster tools are disabled; agents can only return text output.")
     else:
@@ -478,6 +551,9 @@ def run_demo_stream(
     failed = False
     ops_escalation: Optional[str] = None
     ops_fix_count = 0
+    awaiting_human_input = False
+    human_input_requests: List[str] = []
+    final_override: Optional[str] = None
     handoff_count = 0
     handoff_max = int(os.getenv("AGENT_HANDOFF_MAX", "6"))
     trace: Dict[str, Dict[str, Any]] = {
@@ -510,6 +586,7 @@ def run_demo_stream(
             "workspace_container": cluster_info.get("workspace_container"),
             "enabled": cluster_info.get("enabled"),
         },
+        "human_input_requests": [],
         "handoffs": [],
     }
     base_system_messages: List[str] = []
@@ -524,6 +601,12 @@ def run_demo_stream(
             "Expose ports to the host with:\n"
             "```json\n"
             "{\"tool\":\"playground.expose_port\",\"host_port\":18000,\"container_port\":8000}\n"
+            "```\n"
+            "Infrastructure tooling (if mounted): use ssh/scp/rsync for remote hosts and kubectl for clusters. "
+            "If PLAYGROUND_SSH_DIR or PLAYGROUND_KUBECONFIG is mounted, you can access /root/.ssh and /root/.kube/config.\n"
+            "For host Docker/Compose, use playground.docker with args like:\n"
+            "```json\n"
+            "{\"tool\":\"playground.docker\",\"args\":[\"compose\",\"up\",\"-d\"],\"timeout_s\":600}\n"
             "```\n"
             "Manage Docker containers (create/restart/remove) with:\n"
             "```json\n"
@@ -557,7 +640,7 @@ def run_demo_stream(
         )
     base_system_messages.append(
         "HANDOFF_PROTOCOL:\n"
-        "- To route work to another role, include a line: NEXT_ROLE: <planner|coder|reviewer|ops|aggregator>\n"
+        "- To route work to another role, include a line: NEXT_ROLE: <supervisor|planner|coder|reviewer|ops|aggregator>\n"
         "- Use this only when more work is required; otherwise omit it.\n"
     )
     if use_cluster:
@@ -579,13 +662,13 @@ def run_demo_stream(
 
     def _build_extra_context(stage_name: str, tool_context_snapshot: Optional[List[str]] = None) -> str:
         extra_context = ""
-        if stage_name == "planner" and ops_escalation:
+        if stage_name in {"supervisor", "planner"} and ops_escalation:
             extra_context = f"Ops escalation:\n{ops_escalation}"
-        elif stage_name != "planner":
+        if outputs:
             context_parts = [f"{k.title()} Output:\n{v.output}" for k, v in outputs.items()]
-            extra_context = "\n\n".join(context_parts)
+            extra_context = "\n\n".join(filter(None, [extra_context, "\n\n".join(context_parts)]))
         human_messages = _load_human_messages()
-        if human_messages:
+        if human_messages and stage_name == "supervisor":
             human_block = "Human input (most recent last):\n" + "\n".join(f"- {msg}" for msg in human_messages)
             extra_context = "\n\n".join(filter(None, [extra_context, human_block]))
         context_chunks = tool_context_snapshot if tool_context_snapshot is not None else tool_context_chunks
@@ -612,6 +695,14 @@ def run_demo_stream(
     def _completion_check() -> tuple[bool, str]:
         if not _project_files_exist():
             return False, "No project files created under agent_projects."
+        if _requires_project_scaffold(goal, scenario):
+            missing: List[str] = []
+            if not (run_root / "Dockerfile").exists():
+                missing.append("Dockerfile")
+            if not ((run_root / "docker-compose.yml").exists() or (run_root / "docker-compose.yaml").exists()):
+                missing.append("docker-compose.yml")
+            if missing:
+                return False, f"Missing required deliverables: {', '.join(missing)}"
         if _should_autobuild_webserver(goal):
             app_path = BASE_DIR / "agent_projects" / run_id / "app.py"
             if not app_path.exists():
@@ -676,7 +767,7 @@ def run_demo_stream(
         system_messages: List[str],
         max_tokens: int,
     ) -> None:
-        nonlocal failed, ops_escalation, ops_fix_count, handoff_count
+        nonlocal failed, ops_escalation, ops_fix_count, handoff_count, awaiting_human_input, human_input_requests
         tokens = result.tokens or estimate_tokens(result.output)
         tok_s = compute_throughput(tokens, elapsed_ms)
         metrics = StageMetrics(ms=elapsed_ms, ttft_ms=elapsed_ms, tokens=tokens, tok_s=tok_s)
@@ -775,6 +866,9 @@ def run_demo_stream(
                         result = playground_manager.expose_port(playground_name, host_port, container_port)
                         if result.get("ok"):
                             playground_info["web_port"] = host_port
+                            playground_info.setdefault("exposed_ports", [])
+                            if host_port not in playground_info["exposed_ports"]:
+                                playground_info["exposed_ports"].append(host_port)
                             events.append(f"Port {host_port} exposed to playground {playground_name}.")
                             entry = {
                                 "cmd": f"expose_port {host_port}:{container_port}",
@@ -994,9 +1088,19 @@ def run_demo_stream(
             tokens=metrics.tokens,
             output=result.output,
         )
-        if stage_name == "planner" and ops_escalation:
+        requested = _extract_human_input_requests(result.output)
+        if requested:
+            awaiting_human_input = True
+            human_input_requests.extend(requested)
+            trace["human_input_requests"].extend(requested)
+            events.append(
+                f"{stage_name.title()} requested human input: " + " | ".join(requested)
+            )
+            if len(events) > 500:
+                del events[:-500]
+        if stage_name in {"supervisor", "planner"} and ops_escalation:
             ops_escalation = None
-        if handoff_count < handoff_max:
+        if handoff_count < handoff_max and not awaiting_human_input:
             next_role = _extract_handoff(result.output)
             if next_role:
                 stage_queue.insert(0, next_role)
@@ -1005,9 +1109,33 @@ def run_demo_stream(
         return
 
     def _finalize_stage(stage_name: str) -> Optional[str]:
-        nonlocal failed, ops_escalation, ops_fix_count, attempt, outputs
+        nonlocal failed, ops_escalation, ops_fix_count, attempt, outputs, awaiting_human_input, human_input_requests, final_override
         total_ms = (time.perf_counter() - start_time) * 1000
+        if awaiting_human_input:
+            base_text = ""
+            if outputs:
+                base_text = outputs.get("aggregator", outputs.get(stage_name, AgentResult(stage_name, ""))).output
+            human_block = _format_human_input_block(human_input_requests)
+            summary = _format_access_summary(run_id, playground_info, cluster_info)
+            final_text = "\n\n".join(filter(None, [base_text, human_block, summary])).strip()
+            final_override = final_text
+            trace["timings"]["total_ms"] = total_ms
+            yield _serialize(
+                stages,
+                goal,
+                scenario,
+                final=final_text,
+                total_ms=total_ms,
+                playground=playground_info,
+                cluster=cluster_info,
+                dml=dml_info,
+                events=events,
+            )
+            return final_text
         final_text = outputs.get("aggregator", AgentResult(stage_name, "")).output if outputs else ""
+        if stage_name == "aggregator":
+            summary = _format_access_summary(run_id, playground_info, cluster_info)
+            final_text = f"{final_text}\n\n{summary}".strip()
         trace["timings"]["total_ms"] = total_ms
         yield _serialize(
             stages,
@@ -1036,7 +1164,7 @@ def run_demo_stream(
                         ],
                     )
                 )
-                retry_stages = ["planner", "coder", "reviewer", "ops"]
+                retry_stages = ["supervisor", "planner", "coder", "reviewer", "ops"]
                 if "aggregator" in stage_queue:
                     insert_at = stage_queue.index("aggregator")
                     stage_queue[insert_at:insert_at] = retry_stages
@@ -1047,9 +1175,12 @@ def run_demo_stream(
             ok, reason = _completion_check()
             if not ok:
                 events.append(f"Completion check failed: {reason}")
-                if attempt < max_attempts:
+                if max_attempts == 0 or attempt < max_attempts:
                     attempt += 1
-                    events.append(f"Retrying attempt {attempt} of {max_attempts}")
+                    if max_attempts == 0:
+                        events.append(f"Retrying attempt {attempt} (unlimited retries)")
+                    else:
+                        events.append(f"Retrying attempt {attempt} of {max_attempts}")
                     ops_escalation = f"Task incomplete: {reason}"
                     outputs.clear()
                     for stage in stages:
@@ -1074,8 +1205,9 @@ def run_demo_stream(
                         events=events,
                     )
                     return None
-                failed = True
-                trace["errors"].append({"stage": "completion", "error": reason})
+                if max_attempts != 0:
+                    failed = True
+                    trace["errors"].append({"stage": "completion", "error": reason})
 
         if failed:
             if use_playground:
@@ -1283,7 +1415,7 @@ def run_demo_stream(
         try:
             extra_context = _build_extra_context(stage_name)
             max_tokens = 512 if fast else 1024
-            if stage_name == "aggregator":
+            if stage_name in {"supervisor", "aggregator"}:
                 max_tokens = 384 if fast else 768
             system_messages = _build_system_messages(stage_name)
             result = call_agent(
@@ -1325,11 +1457,15 @@ def run_demo_stream(
             break
 
     total_ms = (time.perf_counter() - start_time) * 1000
-    final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
+    if final_override:
+        final_text = final_override
+    else:
+        final_text = outputs.get("aggregator", AgentResult("aggregator", "")).output
+        final_text = f"{final_text}\n\n{_format_access_summary(run_id, playground_info, cluster_info)}".strip()
     if playground_log:
         trace["playground"]["log"] = playground_log
     if use_cluster:
-        if long_run_mode:
+        if long_run_mode and not awaiting_human_input:
             fix_iterations: List[Dict[str, Any]] = []
             last_validation: Dict[str, Any] = {}
             iteration = 0
@@ -1426,6 +1562,9 @@ def run_demo_stream(
                             result = playground_manager.expose_port(playground_name, host_port, container_port)
                             if result.get("ok"):
                                 playground_info["web_port"] = host_port
+                                playground_info.setdefault("exposed_ports", [])
+                                if host_port not in playground_info["exposed_ports"]:
+                                    playground_info["exposed_ports"].append(host_port)
                                 events.append(f"Port {host_port} exposed to playground {playground_name}.")
                                 entry = {
                                     "cmd": f"expose_port {host_port}:{container_port}",
